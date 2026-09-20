@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dd_vault — setup, install, and use</title>
+  <meta name="description" content="Tutorial for dd_vault: a keyboard-first vim-flavored markdown vault TUI.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230F1114'/><text x='2' y='12' font-size='10' fill='%2364B4F5'>dv</text></svg>">
+  <style>
+    :root {
+      --base: #0F1114;
+      --body: #2A2D31;
+      --modal: #1C1E21;
+      --text: #F5F6F7;
+      --muted: #9EA3AA;
+      --label: #FFAF46;
+      --focus: #64B4F5;
+      --link: #FFA087;
+      --ok: #82e0aa;
+      --warn: #f5c469;
+      --max: 52rem;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--base);
+      color: var(--text);
+      font: 17px/1.55 "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    }
+    a { color: var(--focus); }
+    a:hover { color: var(--link); }
+    code, kbd, pre {
+      font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.88em;
+    }
+    kbd {
+      background: var(--modal);
+      border: 1px solid var(--muted);
+      border-radius: 4px;
+      padding: 0.05em 0.4em;
+      color: var(--focus);
+      white-space: nowrap;
+    }
+    pre {
+      background: var(--modal);
+      border: 1px solid #3a3e44;
+      border-radius: 8px;
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      color: var(--text);
+    }
+    header.site {
+      border-bottom: 1px solid #3a3e44;
+      background: var(--base);
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    header.site .inner, main, footer.site .inner {
+      max-width: var(--max);
+      margin: 0 auto;
+      padding: 0 1.25rem;
+    }
+    header.site .inner {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 1rem;
+      padding-top: 0.85rem;
+      padding-bottom: 0.85rem;
+    }
+    .brand {
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      color: var(--focus);
+      font-weight: 700;
+      text-decoration: none;
+      letter-spacing: 0.02em;
+    }
+    nav { display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; }
+    nav a { color: var(--muted); text-decoration: none; font-size: 0.92rem; }
+    nav a:hover { color: var(--text); }
+    h1, h2, h3 {
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+    }
+    h1 { font-size: 2.1rem; margin: 2.2rem 0 0.4rem; }
+    h2 {
+      font-size: 1.35rem;
+      margin: 2.4rem 0 0.7rem;
+      color: var(--label);
+      border-bottom: 1px solid #3a3e44;
+      padding-bottom: 0.3rem;
+    }
+    h3 { font-size: 1.05rem; color: var(--focus); margin: 1.6rem 0 0.4rem; }
+    .lede { color: var(--muted); font-size: 1.15rem; margin: 0 0 1.5rem; }
+    figure {
+      margin: 1.1rem 0 1.6rem;
+      background: var(--body);
+      border: 1px solid #3a3e44;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    figure img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    figcaption {
+      padding: 0.65rem 0.9rem 0.8rem;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.95rem;
+      margin: 0.6rem 0 1.2rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.4rem 0.5rem;
+      border-bottom: 1px solid #3a3e44;
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    .skip {
+      position: absolute;
+      left: -999px;
+    }
+    .skip:focus { left: 1rem; top: 0.5rem; background: var(--modal); padding: 0.3rem 0.6rem; }
+    footer.site {
+      border-top: 1px solid #3a3e44;
+      margin-top: 3rem;
+      padding: 1.4rem 0 2rem;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+    ul.plain { padding-left: 1.2rem; }
+    li { margin: 0.25rem 0; }
+    @media (max-width: 640px) {
+      h1 { font-size: 1.7rem; }
+      header.site .inner { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site">
+    <div class="inner">
+      <a class="brand" href="#top">dd_vault</a>
+      <nav aria-label="On this page">
+        <a href="#setup">Setup</a>
+        <a href="#install">Install</a>
+        <a href="#use">Use</a>
+        <a href="#keys">Keys</a>
+        <a href="#screenshots">Update images</a>
+      </nav>
+    </div>
+  </header>
+  <main id="main">
+    <h1 id="top">dd_vault tutorial</h1>
+    <p class="lede">A keyboard-first, vim-flavored markdown vault. Files on disk are the source of truth. Git is sync. AI is opt-in.</p>
+
+    <h2 id="setup">1. Setup</h2>
+    <p>You need <strong>Linux or macOS</strong>, <strong>Rust 1.82+</strong> (<a href="https://rustup.rs">rustup</a>), <code>cargo</code>, and <code>git</code> on your <code>PATH</code>.</p>
+    <ul class="plain">
+      <li>Optional for git sync: SSH agent or a mode-<code>0600</code> credential file at <code>~/.config/ldnddev/credentials</code>.</li>
+      <li>Optional for AI: <code>XAI_API_KEY</code> (SpaceXAI) or a local CLI (<code>ollama</code>, <code>grok</code>, <code>llm</code>).</li>
+    </ul>
+    <p>Config lives under <code>~/.config/ldnddev/</code> (or <code>$XDG_CONFIG_HOME/ldnddev/</code>):</p>
+    <table>
+      <thead><tr><th>File</th><th>Role</th></tr></thead>
+      <tbody>
+        <tr><td><code>vaults.toml</code></td><td>Registered vaults and last opened path</td></tr>
+        <tr><td><code>dd_vault_theme.yml</code></td><td>Global theme (local <code>./dd_vault_theme.yml</code> wins)</td></tr>
+        <tr><td><code>config.toml</code></td><td><code>[ai]</code> enable/allowlist, extra secret-scan patterns</td></tr>
+        <tr><td><code>credentials</code></td><td>Git credential-store, must be mode 0600</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="install">2. Install</h2>
+    <p>One line:</p>
+    <pre>curl -fsSL https://raw.githubusercontent.com/ldnddev/dd_vault/main/install.sh | bash</pre>
+    <figure>
+      <img src="screenshots/01-install.jpg" width="1280" height="720" alt="Terminal running the curl install script, then dd_vault init">
+      <figcaption>Install from curl, then create a vault.</figcaption>
+    </figure>
+    <p>From a clone: <code>./install.sh</code>. Default prefix is <code>~/.local</code> (binary in <code>~/.local/bin</code>). Override with <code>PREFIX</code> or <code>BIN_DIR</code>.</p>
+    <pre>dd_vault init ~/Notes
+dd_vault open ~/Notes
+dd_vault
+dd_vault --reindex ~/Notes</pre>
+    <ul class="plain">
+      <li><code>init</code> creates <code>notes/</code>, <code>assets/</code>, <code>.gitignore</code>, and <code>.dd_vault-&lt;name&gt;/</code>.</li>
+      <li><code>open</code> registers the vault and launches the TUI.</li>
+      <li>Bare <code>dd_vault</code> reopens the last vault, or the picker.</li>
+    </ul>
+
+    <h2 id="use">3. Use</h2>
+    <h3>Layout</h3>
+    <p>Three-line header, body (tree | editor / preview), one-line footer. The AI chip sits bottom-right. Header and footer never hide.</p>
+    <figure>
+      <img src="screenshots/02-layout.jpg" width="1280" height="720" alt="dd_vault main layout with tree, editor, preview, and collapsed AI card">
+      <figcaption>Default layout: tree, editor, live preview, AI chip.</figcaption>
+    </figure>
+
+    <h3>Notes and the editor</h3>
+    <p>In the tree: <kbd>j</kbd>/<kbd>k</kbd> move, <kbd>Enter</kbd> opens, <kbd>a</kbd> new file (trailing <code>/</code> is a folder), <kbd>r</kbd> rename, <kbd>d</kbd> delete. Click a line to place the caret; drag to select. <kbd>i</kbd> insert, <kbd>:w</kbd> or <kbd>Ctrl+S</kbd> save. <kbd>Ctrl+V</kbd> pastes a clipboard image into <code>assets/</code>.</p>
+    <figure>
+      <img src="screenshots/08-editor.jpg" width="1280" height="720" alt="Editor in INSERT mode with a blinking caret">
+      <figcaption>INSERT mode. Dirty notes show ± in the editor title.</figcaption>
+    </figure>
+    <p><kbd>:daily</kbd> or <kbd>Space</kbd> then <kbd>n</kbd> <kbd>d</kbd> opens <code>notes/daily/YYYY-MM-DD.md</code>.</p>
+
+    <h3>Find and search</h3>
+    <p><kbd>Space</kbd> <kbd>f</kbd> <kbd>f</kbd> files, <kbd>s</kbd> <kbd>g</kbd> content (FTS), <kbd>t</kbd> <kbd>g</kbd> tags. In INSERT, <code>[[</code> opens the wikilink picker. Type to filter; <kbd>Enter</kbd> opens or inserts.</p>
+    <figure>
+      <img src="screenshots/03-finder.jpg" width="1280" height="720" alt="File finder modal filtering notes">
+      <figcaption>File finder. Titles and aliases participate in search.</figcaption>
+    </figure>
+
+    <h3>Git</h3>
+    <p>The editor title shows <code>git:clean</code>, <code>git:±N</code>, or <code>git:conflict</code>. From NORMAL: <kbd>:git pull</kbd>, <kbd>:git push</kbd>, <kbd>:git commit</kbd> (message modal). Commits scan for <code>ghp_</code>, <code>github_pat_</code>, <code>AKIA</code>. Overlapping pull conflicts write <code>*.conflict-&lt;ts&gt;.*</code> sidecars and keep yours.</p>
+    <figure>
+      <img src="screenshots/04-git.jpg" width="1280" height="720" alt="Git commit message modal">
+      <figcaption>Commit asks for a message. Palette also lists git actions.</figcaption>
+    </figure>
+
+    <h3>AI (opt-in)</h3>
+    <p>Off until <kbd>:ai on</kbd>. <kbd>Space</kbd> <kbd>a</kbd> <kbd>i</kbd> cycles collapsed → chat → full. Each request lists what will be sent; <kbd>y</kbd> confirms. Default provider is SpaceXAI (<code>grok-4.6</code>, <code>XAI_API_KEY</code>). <kbd>Esc</kbd> cancels a stream.</p>
+    <figure>
+      <img src="screenshots/05-ai.jpg" width="1280" height="720" alt="Expanded AI chat card overlay">
+      <figcaption>AI card. Badge is off, net, or local.</figcaption>
+    </figure>
+
+    <h3>Focus, zen, help, theme</h3>
+    <ul class="plain">
+      <li><kbd>Space</kbd> <kbd>z</kbd> — hide the tree (focus).</li>
+      <li><kbd>Space</kbd> <kbd>h</kbd> — editor only; keep header and footer (zen).</li>
+      <li><kbd>Space</kbd> <kbd>e</kbd> — show/hide the tree (also on narrow terminals).</li>
+      <li><kbd>F1</kbd> — this help, in-app.</li>
+      <li><kbd>F2</kbd> — live theme editor. Lookup: <code>./dd_vault_theme.yml</code> → <code>~/.config/ldnddev/dd_vault_theme.yml</code> → builtin.</li>
+    </ul>
+    <figure>
+      <img src="screenshots/07-zen.jpg" width="1280" height="720" alt="Zen mode: editor only with header and footer">
+      <figcaption>Zen: tree, preview, and AI hidden. Chrome stays.</figcaption>
+    </figure>
+    <figure>
+      <img src="screenshots/06-help.jpg" width="1280" height="720" alt="F1 help overlay listing keybindings">
+      <figcaption>F1 help. Scroll with j/k.</figcaption>
+    </figure>
+
+    <h2 id="keys">4. Keys (short)</h2>
+    <table>
+      <thead><tr><th>Keys</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td><kbd>F1</kbd> / <kbd>F2</kbd></td><td>Help / theme</td></tr>
+        <tr><td><kbd>Ctrl+Q</kbd> / <kbd>Ctrl+S</kbd></td><td>Quit / save</td></tr>
+        <tr><td><kbd>Tab</kbd></td><td>Tree → editor → preview</td></tr>
+        <tr><td><kbd>Space</kbd> <kbd>Space</kbd></td><td>Command palette</td></tr>
+        <tr><td><kbd>Space</kbd> <kbd>v</kbd> <kbd>v</kbd></td><td>Vault picker</td></tr>
+        <tr><td><kbd>Space</kbd> <kbd>p</kbd></td><td>Toggle preview</td></tr>
+        <tr><td><kbd>:git pull|push|commit</kbd></td><td>Sync</td></tr>
+        <tr><td><kbd>:ai on</kbd> / <kbd>:ai …</kbd></td><td>Enable AI / prompt</td></tr>
+      </tbody>
+    </table>
+    <p>Leader <kbd>Space</kbd> is NORMAL/tree only, not INSERT.</p>
+
+    <h2 id="screenshots">5. How to update these screenshots</h2>
+    <p>Files live in <code>docs/screenshots/</code>. The HTML references them by <strong>filename</strong>, not by generation method. Replace a file in place, keep the name, and push.</p>
+    <table>
+      <thead><tr><th>File</th><th>What to capture</th></tr></thead>
+      <tbody>
+        <tr><td><code>01-install.jpg</code></td><td>Shell: curl install, then <code>dd_vault init</code></td></tr>
+        <tr><td><code>02-layout.jpg</code></td><td>Open vault, a note, preview on, AI collapsed</td></tr>
+        <tr><td><code>08-editor.jpg</code></td><td>Same note in INSERT, caret visible</td></tr>
+        <tr><td><code>03-finder.jpg</code></td><td><kbd>Space</kbd> <kbd>f</kbd> <kbd>f</kbd> with a query</td></tr>
+        <tr><td><code>04-git.jpg</code></td><td><kbd>:git commit</kbd> message modal</td></tr>
+        <tr><td><code>05-ai.jpg</code></td><td>AI chat card expanded (<kbd>Space</kbd> <kbd>a</kbd> <kbd>i</kbd>)</td></tr>
+        <tr><td><code>07-zen.jpg</code></td><td><kbd>Space</kbd> <kbd>h</kbd></td></tr>
+        <tr><td><code>06-help.jpg</code></td><td><kbd>F1</kbd></td></tr>
+      </tbody>
+    </table>
+    <p>Preferred recapture (real TUI):</p>
+    <ol>
+      <li>Use a 1280×720 (or 16:9) terminal, dark palette close to <code>dd_vault_theme.yml</code>.</li>
+      <li>Open a throwaway vault with a couple of markdown notes.</li>
+      <li>Screenshot the window (or a compositor picker) for each row above.</li>
+      <li>Export JPEG or PNG, then overwrite the matching <code>docs/screenshots/NN-name.jpg</code> (PNG is fine if you also change the <code>src</code> in <code>index.html</code>).</li>
+      <li>Keep alt text accurate if the UI copy changed.</li>
+    </ol>
+    <p>See also <a href="screenshots/README.md">screenshots/README.md</a>.</p>
+  </main>
+  <footer class="site">
+    <div class="inner">
+      MIT · <a href="https://github.com/ldnddev/dd_vault">source</a>
+      · Pages: <a href="https://ldnddev.github.io/dd_vault/">ldnddev.github.io/dd_vault</a>
+    </div>
+  </footer>
+</body>
+</html>
