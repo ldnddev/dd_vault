@@ -1,0 +1,14 @@
+[package]
+name = "dd_render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "comrak AST to ratatui Text, plus half-block images"
+
+[dependencies]
+comrak.workspace = true
+image.workspace = true
+ratatui.workspace = true
+thiserror.workspace = true

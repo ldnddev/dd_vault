@@ -1,0 +1,25 @@
+[package]
+name = "dd_tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "ratatui shell, layout, focus, and mouse for dd_vault"
+
+[dependencies]
+anyhow.workspace = true
+arboard.workspace = true
+crossterm.workspace = true
+dd_ai = { path = "../dd_ai" }
+dd_edit = { path = "../dd_edit" }
+dd_render = { path = "../dd_render" }
+dd_vault_core = { path = "../dd_vault_core" }
+ldnddev_theme.workspace = true
+notify.workspace = true
+ratatui.workspace = true
+syntect.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true

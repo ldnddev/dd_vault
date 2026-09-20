@@ -1,0 +1,86 @@
+[workspace]
+members = [
+    "crates/ldnddev_theme",
+    "crates/dd_vault_core",
+    "crates/dd_tui",
+    "crates/dd_edit",
+    "crates/dd_render",
+    "crates/dd_ai",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+authors = ["ldnddev"]
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+toml = "0.8"
+crossterm = "0.29"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+ldnddev_theme = { path = "crates/ldnddev_theme" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+clap = { version = "4.5", default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+] }
+insta = "1"
+tempfile = "3"
+ropey = "1"
+comrak = "0.41"
+rusqlite = { version = "0.32", features = ["bundled"] }
+nucleo-matcher = "0.3"
+sha2 = "0.10"
+hex = "0.4"
+serde_json = "1"
+ignore = "0.4"
+notify = "7"
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
+arboard = { version = "3", features = ["wayland-data-control"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] }
+syntect = { version = "5", default-features = false, features = [
+    "default-syntaxes",
+    "default-themes",
+    "regex-fancy",
+] }
+
+[package]
+name = "dd_vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Keyboard-first vim-flavored markdown knowledge vault TUI"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+dd_tui = { path = "crates/dd_tui" }
+dd_vault_core = { path = "crates/dd_vault_core" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false

@@ -1,0 +1,28 @@
+---
+source: crates/dd_tui/src/tests.rs
+expression: text
+---
+┌ dd_vault ────────────────────────────────────────────────────────────────────────────── no vault ┐
+│Files on disk. Opinions in git.                                                                   │
+└─────────┌Key & Mouse bindings (F1 / Esc to close, j/k or arrows to scroll)─────────────┐─────────┘
+┌ vault ──│Global                                                                        │─────────┐
+│open a va│                                                                              │         │
+│         │  • F1                Open/close this help                                    │         │
+│         │  • F2                Live theme editor (source, tokens, save local/global)   │         │
+│         │  • Ctrl+Q            Quit                                                    │         │
+│         │  • Tab               Focus tree → editor → preview                           │         │
+│         │  • <Space>p          Toggle markdown preview                                 │         │
+│         │  • <Space>ff         File finder                                             │         │
+│         │  • <Space>sg         Content search (FTS)                                    │         │
+│         │  • <Space>tg         Tag search                                              │         │
+│         │  • <Space>vv         Vault picker (registered vaults)                        │         │
+│         │  • <Space>nd         Open today's daily note                                 │─────────┘
+│         │  • <Space><Space>    Command palette                                         │─────────┐
+│         │  • <Space>ai         Cycle AI card (collapsed / chat / full)                 │         │
+│         │  • :ai on|off|<prompt>Enable, disable, or prompt the AI                      │         │
+│         │  • <Space>z          Focus mode (hide the tree)                              │         │
+│         │  • <Space>h          Zen (editor only; keep header/footer)                   │         │
+│         │  • <Space>e          Toggle the tree (explore)                               │ok-4.6 ─┐│
+│         └──────────────────────────────────────────────────────────────────────────────┘ai      ││
+└───────────────────────┘└───────────────────────────────────────────────────└────────────────────┘┘
+F1: Help  Esc: Close  Ctrl+Q: Quit
