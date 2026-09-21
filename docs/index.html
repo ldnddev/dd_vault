@@ -223,7 +223,7 @@ dd_vault --reindex ~/Notes</pre>
     </figure>
 
     <h3>Git</h3>
-    <p>The editor title shows <code>git:clean</code>, <code>git:±N</code>, or <code>git:conflict</code>. From NORMAL: <kbd>:git pull</kbd>, <kbd>:git push</kbd>, <kbd>:git commit</kbd> (message modal). Commits scan for <code>ghp_</code>, <code>github_pat_</code>, <code>AKIA</code>. Overlapping pull conflicts write <code>*.conflict-&lt;ts&gt;.*</code> sidecars and keep yours.</p>
+    <p>The editor title shows <code>git:clean</code>, <code>git:±N</code>, or <code>git:conflict</code>. Set <code>git config --global user.name</code> and <code>user.email</code> once. From NORMAL: <kbd>:git pull</kbd>; <kbd>:git commit</kbd> stages all and asks for a message; <kbd>:git push</kbd> does the same if there are changes, then pushes (sets <code>origin</code> upstream on first push). Commits scan for <code>ghp_</code>, <code>github_pat_</code>, <code>AKIA</code>. Overlapping pull conflicts write <code>*.conflict-&lt;ts&gt;.*</code> sidecars and keep yours.</p>
     <figure>
       <img src="screenshots/04-git.jpg" width="1280" height="720" alt="Git commit message modal">
       <figcaption>Commit asks for a message. Palette also lists git actions.</figcaption>

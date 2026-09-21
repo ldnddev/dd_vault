@@ -31,31 +31,63 @@ impl App {
                 self.refresh_git();
                 self.push_toast(ToastLevel::Info, self.git.detail());
             }
-            GitOp::Commit => {
-                if self.vault.is_none() {
-                    self.push_toast(ToastLevel::Error, "No vault open");
+            GitOp::Commit => self.begin_git_commit(false),
+            GitOp::Push => {
+                if !self.prepare_git_op() {
                     return;
                 }
-                self.refresh_git();
-                if matches!(self.git.state, dd_vault_core::GitState::NotRepo) {
-                    self.push_toast(
-                        ToastLevel::Error,
-                        "not a git repository (run git init in the vault to enable sync)",
-                    );
-                    return;
+                match self.git.state {
+                    dd_vault_core::GitState::Conflict => {
+                        self.push_toast(
+                            ToastLevel::Error,
+                            "unmerged files; :git pull to resolve before push",
+                        );
+                    }
+                    dd_vault_core::GitState::Dirty(_) => self.begin_git_commit(true),
+                    _ => self.run_git_op("push", push),
                 }
-                if self.editor.dirty {
-                    self.push_toast(ToastLevel::Warning, "Save the note (:w) before git commit");
-                    return;
-                }
-                self.modal = Some(Modal::Prompt {
-                    kind: PromptKind::GitCommit,
-                    draft: String::new(),
-                });
             }
             GitOp::Pull => self.run_git_op("pull", pull),
-            GitOp::Push => self.run_git_op("push", push),
         }
+    }
+
+    fn prepare_git_op(&mut self) -> bool {
+        if self.vault.is_none() {
+            self.push_toast(ToastLevel::Error, "No vault open");
+            return false;
+        }
+        if self.editor.dirty {
+            self.save_note();
+            if self.editor.dirty {
+                return false;
+            }
+        }
+        self.refresh_git();
+        if matches!(self.git.state, dd_vault_core::GitState::NotRepo) {
+            self.push_toast(
+                ToastLevel::Error,
+                "not a git repository (run git init in the vault to enable sync)",
+            );
+            return false;
+        }
+        true
+    }
+
+    fn begin_git_commit(&mut self, then_push: bool) {
+        if !self.prepare_git_op() {
+            return;
+        }
+        if matches!(self.git.state, dd_vault_core::GitState::Conflict) {
+            self.push_toast(
+                ToastLevel::Error,
+                "unmerged files; :git pull to resolve before commit",
+            );
+            return;
+        }
+        self.modal = Some(Modal::Prompt {
+            kind: PromptKind::GitCommit { then_push },
+            draft: String::new(),
+        });
     }
 
     fn run_git_op(
@@ -99,10 +131,12 @@ impl App {
         }))
     }
 
-    pub fn submit_git_commit(&mut self, message: String) {
+    pub fn submit_git_commit(&mut self, message: String, then_push: bool) {
         if self.editor.dirty {
-            self.push_toast(ToastLevel::Warning, "Save the note (:w) before git commit");
-            return;
+            self.save_note();
+            if self.editor.dirty {
+                return;
+            }
         }
         let msg = message;
         let result = self.with_git_ctx(|ctx| commit(&ctx, &msg));
@@ -113,6 +147,9 @@ impl App {
             Ok(res) => {
                 self.modal = None;
                 self.finish_git_result("commit", res);
+                if then_push {
+                    self.run_git_op("push", push);
+                }
             }
             Err(err) => self.push_toast(ToastLevel::Error, err.to_string()),
         }

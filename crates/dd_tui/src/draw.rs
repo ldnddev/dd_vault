@@ -1078,7 +1078,10 @@ fn render_prompt(frame: &mut Frame, app: &App) {
             format!(" New in {loc}  (name/ = folder) ")
         }
         PromptKind::Rename { rel } => format!(" Rename {} ", rel.display()),
-        PromptKind::GitCommit => " Git commit message ".to_string(),
+        PromptKind::GitCommit { then_push: false } => " Git commit message ".to_string(),
+        PromptKind::GitCommit { then_push: true } => {
+            " Commit all changes, then push ".to_string()
+        }
     };
     let area = centered_rect(70, 30, frame.area());
     frame.render_widget(Clear, area);

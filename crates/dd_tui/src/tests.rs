@@ -590,7 +590,7 @@ fn git_commit_modal_and_secret_scan() {
     assert!(matches!(
         app.modal,
         Some(Modal::Prompt {
-            kind: crate::app::PromptKind::GitCommit,
+            kind: crate::app::PromptKind::GitCommit { .. },
             ..
         })
     ));
@@ -618,6 +618,27 @@ fn git_commit_modal_and_secret_scan() {
             .any(|t| t.message.contains("secret") || t.message.contains("ghp_")),
         "{:?}",
         app.toasts.iter().map(|t| &t.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn git_push_when_dirty_prompts_commit() {
+    let (_dir, mut app) = vault_app();
+    let root = app.vault.as_ref().unwrap().root.clone();
+    git_init_at(&root);
+    app.refresh_git();
+    app.pane = Pane::Editor;
+    type_cmd(&mut app, "git push");
+    assert!(
+        matches!(
+            app.modal,
+            Some(Modal::Prompt {
+                kind: crate::app::PromptKind::GitCommit { then_push: true },
+                ..
+            })
+        ),
+        "{:?}",
+        app.modal
     );
 }
 

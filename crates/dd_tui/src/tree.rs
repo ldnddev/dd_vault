@@ -374,8 +374,8 @@ impl App {
                 }
                 Err(err) => self.push_toast(ToastLevel::Error, err),
             },
-            PromptKind::GitCommit => {
-                self.submit_git_commit(draft);
+            PromptKind::GitCommit { then_push } => {
+                self.submit_git_commit(draft, then_push);
             }
             PromptKind::Rename { rel } => {
                 let name = draft.trim();

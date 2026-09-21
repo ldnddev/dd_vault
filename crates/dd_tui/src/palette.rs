@@ -108,7 +108,7 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem {
         id: "git-push",
         label: "Git push",
-        keys: ":git push",
+        keys: ":git push  (commit if dirty, then push)",
     },
 ];
 

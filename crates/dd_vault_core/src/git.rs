@@ -7,8 +7,9 @@ use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::VaultConfig;
-use crate::paths::Paths;
-use crate::vault::Vault;
+use crate::paths::{is_metadata_dirname, Paths};
+use crate::skip::{skip_dir_name, skip_file_name};
+use crate::vault::{Vault, GITIGNORE};
 use crate::Error;
 
 /// Built-in pre-commit needles. Extra patterns come from config.
@@ -146,13 +147,16 @@ pub fn commit(ctx: &GitCtx<'_>, message: &str) -> Result<GitOpResult, Error> {
         return Err(Error::Git("commit message is empty".into()));
     }
     ensure_repo(ctx.root)?;
+    require_identity(ctx.root)?;
     let st = status(ctx.root)?;
     if matches!(st.state, GitState::Conflict) {
         return Err(Error::Git(
             "unmerged files; pull/resolve conflicts before commit".into(),
         ));
     }
+    ensure_meta_gitignore(ctx.root);
     run_git_ok(ctx.root, &["add", "-A"], ctx.credentials)?;
+    unstage_skipped(ctx.root, ctx.credentials);
     let hits = scan_staged(ctx.root, ctx.extra_secret_patterns)?;
     if !hits.is_empty() {
         let _ = run_git(ctx.root, &["reset"], ctx.credentials);
@@ -169,7 +173,12 @@ pub fn commit(ctx: &GitCtx<'_>, message: &str) -> Result<GitOpResult, Error> {
             auto_merged: Vec::new(),
         });
     }
-    run_git_ok(ctx.root, &["commit", "-m", message], ctx.credentials)?;
+    // --no-gpg-sign: pinentry cannot run inside the TUI.
+    run_git_ok(
+        ctx.root,
+        &["commit", "--no-gpg-sign", "-m", message],
+        ctx.credentials,
+    )?;
     Ok(GitOpResult {
         message: format!("Committed: {message}"),
         sidecars: Vec::new(),
@@ -179,21 +188,85 @@ pub fn commit(ctx: &GitCtx<'_>, message: &str) -> Result<GitOpResult, Error> {
 
 pub fn push(ctx: &GitCtx<'_>) -> Result<GitOpResult, Error> {
     ensure_repo(ctx.root)?;
+    let st = status(ctx.root)?;
+    if matches!(st.state, GitState::Conflict) {
+        return Err(Error::Git(
+            "unmerged files; pull/resolve before push".into(),
+        ));
+    }
+    push_now(ctx)
+}
+
+fn push_now(ctx: &GitCtx<'_>) -> Result<GitOpResult, Error> {
     let out = run_git(ctx.root, &["push"], ctx.credentials)?;
     if out.status.success() {
-        let err = stderr_lossy(&out);
-        let out_s = stdout_lossy(&out);
-        let msg = first_line(&err)
-            .or_else(|| first_line(&out_s))
-            .unwrap_or("Pushed")
-            .to_string();
         return Ok(GitOpResult {
-            message: msg,
+            message: push_message(&out),
             sidecars: Vec::new(),
             auto_merged: Vec::new(),
         });
     }
-    Err(Error::Git(err_or(&out, "push failed")))
+    let err = err_or(&out, "push failed");
+    if looks_like_no_upstream(&err) {
+        let remotes = run_git_ok(ctx.root, &["remote"], ctx.credentials).unwrap_or_default();
+        if remotes.lines().any(|r| r.trim() == "origin") {
+            let out2 = run_git(
+                ctx.root,
+                &["push", "-u", "origin", "HEAD"],
+                ctx.credentials,
+            )?;
+            if out2.status.success() {
+                return Ok(GitOpResult {
+                    message: "Pushed (upstream set to origin)".into(),
+                    sidecars: Vec::new(),
+                    auto_merged: Vec::new(),
+                });
+            }
+            return Err(Error::Git(err_or(&out2, "push failed")));
+        }
+        return Err(Error::Git(
+            "no upstream branch (git remote add origin <url>, then :git push)".into(),
+        ));
+    }
+    Err(Error::Git(err))
+}
+
+fn push_message(out: &std::process::Output) -> String {
+    let err = stderr_lossy(out);
+    let out_s = stdout_lossy(out);
+    first_line(&err)
+        .or_else(|| first_line(&out_s))
+        .unwrap_or("Pushed")
+        .to_string()
+}
+
+fn looks_like_no_upstream(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("no upstream") || e.contains("has no upstream branch")
+}
+
+fn require_identity(root: &Path) -> Result<(), Error> {
+    let name = git_config_get(root, "user.name");
+    let email = git_config_get(root, "user.email");
+    if name.is_none() || email.is_none() {
+        return Err(Error::Git(
+            "git user.name and user.email are not set. Run: git config --global user.name \"Your Name\" && git config --global user.email you@example.com".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn git_config_get(root: &Path, key: &str) -> Option<String> {
+    let out = run_git(root, &["config", "--get", key], None).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = stdout_lossy(&out);
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 pub fn pull(ctx: &GitCtx<'_>) -> Result<GitOpResult, Error> {
@@ -243,7 +316,11 @@ fn finish_conflicts(ctx: &GitCtx<'_>) -> Result<GitOpResult, Error> {
             hits.join(", ")
         )));
     }
-    let commit_out = run_git(ctx.root, &["commit", "--no-edit"], ctx.credentials)?;
+    let commit_out = run_git(
+        ctx.root,
+        &["commit", "--no-edit", "--no-gpg-sign"],
+        ctx.credentials,
+    )?;
     if !commit_out.status.success() {
         let err = stderr_lossy(&commit_out);
         if err.contains("nothing to commit") {
@@ -424,6 +501,56 @@ fn unmerged_paths(root: &Path) -> Result<Vec<String>, Error> {
         .collect())
 }
 
+fn skip_git_rel(rel: &str) -> bool {
+    rel.split(['/', '\\']).any(|part| {
+        skip_dir_name(part) || skip_file_name(part) || is_metadata_dirname(part)
+    })
+}
+
+fn ensure_meta_gitignore(root: &Path) {
+    let gi = root.join(".gitignore");
+    let existing = fs::read_to_string(&gi).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == ".dd_vault-*/") {
+        return;
+    }
+    let mut body = existing;
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(GITIGNORE);
+    let _ = fs::write(gi, body);
+}
+
+fn unstage_skipped(root: &Path, credentials: Option<&Path>) {
+    let _ = run_git(
+        root,
+        &[
+            "rm",
+            "-r",
+            "--cached",
+            "--ignore-unmatch",
+            "-q",
+            "--",
+            ".dd_vault-*",
+        ],
+        credentials,
+    );
+    let _ = run_git(
+        root,
+        &[
+            "reset",
+            "-q",
+            "--",
+            ".dd_vault-*",
+            "*.db",
+            "*.db-wal",
+            "*.db-shm",
+            ".DS_Store",
+        ],
+        credentials,
+    );
+}
+
 fn scan_staged(root: &Path, extra: &[String]) -> Result<Vec<String>, Error> {
     let out = run_git(
         root,
@@ -439,6 +566,9 @@ fn scan_staged(root: &Path, extra: &[String]) -> Result<Vec<String>, Error> {
     }
     let mut hits = Vec::new();
     for rel in stdout_lossy(&out).lines().filter(|l| !l.is_empty()) {
+        if skip_git_rel(rel) {
+            continue;
+        }
         let path = root.join(rel);
         let Ok(bytes) = fs::read(&path) else {
             continue;
@@ -528,6 +658,8 @@ fn run_git(root: &Path, args: &[&str], credentials: Option<&Path>) -> Result<Out
     cmd.args(args);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.env("GIT_MERGE_AUTOEDIT", "no");
+    cmd.env("GIT_EDITOR", "true");
+    cmd.env("GIT_SEQUENCE_EDITOR", "true");
     if std::env::var_os("GIT_SSH_COMMAND").is_none() {
         cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
@@ -652,6 +784,16 @@ mod tests {
         let st = status(&root).expect("dirty");
         assert_eq!(st.state, GitState::Dirty(1));
         assert_eq!(st.state.title_badge_owned().as_deref(), Some("git:±1"));
+
+        assert!(Command::new("git")
+            .args(["config", "commit.gpgsign", "true"])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        fs::write(root.join("notes/a.md"), "hello again\n").unwrap();
+        commit(&c, "unsigned").expect("commit despite gpgsign");
+        assert_eq!(status(&root).unwrap().state, GitState::Clean);
     }
 
     #[test]
@@ -676,6 +818,50 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&cached.stdout).trim().is_empty(),
             "should unstage on reject"
+        );
+    }
+
+    #[test]
+    fn commit_skips_metadata_dir_even_if_it_mentions_needles() {
+        let (_dir, root) = vault_git();
+        let extra: Vec<String> = Vec::new();
+        let c = ctx(&root, &extra);
+        fs::write(root.join("notes/a.md"), "ok\n").unwrap();
+        commit(&c, "base").unwrap();
+
+        let meta = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(".dd_vault-"))
+            })
+            .expect("meta dir");
+        let cfg = meta.join("config.toml");
+        assert!(
+            fs::read_to_string(&cfg).unwrap().contains("ghp_"),
+            "fixture must mention a needle"
+        );
+        assert!(Command::new("git")
+            .args(["add", "-f"])
+            .arg(&cfg)
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+
+        fs::write(root.join("notes/a.md"), "still ok\n").unwrap();
+        commit(&c, "note only").expect("must not treat metadata comments as secrets");
+        let tracked = Command::new("git")
+            .args(["ls-files"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let tracked = String::from_utf8_lossy(&tracked.stdout);
+        assert!(
+            !tracked.contains(".dd_vault-"),
+            "metadata must not stay tracked: {tracked}"
         );
     }
 

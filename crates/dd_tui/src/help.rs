@@ -168,7 +168,7 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
             (":w :q :wq :q! :e", "Write / quit / open"),
             (
                 ":git pull|push|commit",
-                "Sync via git CLI (commit asks for a message)",
+                "Pull; push stages all + commit message if dirty, then push; commit only",
             ),
             (":daily", "Open today's daily note"),
             ("Ctrl+S", "Save"),

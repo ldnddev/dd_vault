@@ -91,7 +91,7 @@ pub enum FinderKind {
 pub enum PromptKind {
     New { parent: PathBuf },
     Rename { rel: PathBuf },
-    GitCommit,
+    GitCommit { then_push: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
