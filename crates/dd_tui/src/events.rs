@@ -125,6 +125,7 @@ fn handle_picker_key(app: &mut App, k: KeyEvent) {
     match k.code {
         KeyCode::Esc => app.modal = None,
         KeyCode::Enter => app.activate_picker_selection(),
+        KeyCode::Char('d') => app.begin_forget_vault(),
         KeyCode::Down | KeyCode::Char('j') => move_picker(app, 1),
         KeyCode::Up | KeyCode::Char('k') => move_picker(app, -1),
         KeyCode::Home | KeyCode::Char('g') => {
@@ -308,11 +309,6 @@ fn handle_key(app: &mut App, k: KeyEvent) -> Result<()> {
         return handle_filter_key(app, k);
     }
 
-    if app.ai.expanded() && app.leader == Leader::None {
-        app.handle_ai_key(k);
-        return Ok(());
-    }
-
     if app.leader != Leader::None {
         match (app.leader, k.code) {
             (Leader::Space, KeyCode::Char('p')) => app.toggle_preview(),
@@ -343,11 +339,20 @@ fn handle_key(app: &mut App, k: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
+    if k.code == KeyCode::Char(' ')
+        && !k.modifiers.contains(KeyModifiers::CONTROL)
+        && !(app.ai.expanded() && !app.ai.draft.is_empty())
+    {
+        app.leader = Leader::Space;
+        return Ok(());
+    }
+
+    if app.ai.expanded() {
+        app.handle_ai_key(k);
+        return Ok(());
+    }
+
     match k.code {
-        KeyCode::Char(' ') if app.pane != Pane::Editor => app.leader = Leader::Space,
-        KeyCode::Char(' ') if app.pane == Pane::Editor && app.editor.mode == Mode::Normal => {
-            app.leader = Leader::Space;
-        }
         KeyCode::Tab => app.cycle_pane(),
         _ if app.pane == Pane::Tree => handle_tree_key(app, k),
         _ if app.pane == Pane::Editor => {

@@ -100,6 +100,7 @@ pub enum ConfirmKind {
     Discard { next: DiscardNext },
     ReloadDisk { rel: PathBuf },
     AiSend,
+    ForgetVault { name: String, path: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -328,6 +329,60 @@ impl App {
             .unwrap_or(0);
         self.modal = Some(Modal::VaultPicker { selected });
         self.leader = Leader::None;
+    }
+
+    pub fn begin_forget_vault(&mut self) {
+        let Some(Modal::VaultPicker { selected }) = self.modal else {
+            return;
+        };
+        let Some(entry) = self.registry.vaults.get(selected).cloned() else {
+            return;
+        };
+        self.modal = Some(Modal::Confirm {
+            kind: ConfirmKind::ForgetVault {
+                name: entry.name.clone(),
+                path: entry.path.clone(),
+            },
+            message: format!(
+                "Remove vault '{}' from the list?\n{}\n\nThe folder on disk is not deleted.",
+                entry.name, entry.path
+            ),
+        });
+    }
+
+    pub fn forget_vault(&mut self, path: &str, name: &str) {
+        let was_open = self
+            .vault
+            .as_ref()
+            .is_some_and(|v| v.root.to_string_lossy() == path);
+        if !self.registry.unregister(path) {
+            self.modal = None;
+            return;
+        }
+        self.persist_registry();
+        if was_open {
+            self.close_vault();
+        }
+        self.push_toast(
+            ToastLevel::Success,
+            format!("Removed '{name}' from the list (files kept)"),
+        );
+        if self.registry.vaults.is_empty() {
+            self.modal = None;
+        } else {
+            self.open_picker();
+        }
+    }
+
+    pub fn close_vault(&mut self) {
+        self.watch = None;
+        self.index_rx = None;
+        self.index = None;
+        self.vault = None;
+        self.tree = TreeState::default();
+        self.editor = Editor::empty();
+        self.git = GitStatus::default();
+        self.preview_scroll = 0;
     }
 
     pub fn activate_picker_selection(&mut self) {

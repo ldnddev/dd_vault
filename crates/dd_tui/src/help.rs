@@ -100,7 +100,10 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
             ("<Space>ff", "File finder"),
             ("<Space>sg", "Content search (FTS)"),
             ("<Space>tg", "Tag search"),
-            ("<Space>vv", "Vault picker (registered vaults)"),
+            (
+                "<Space>vv",
+                "Vault picker from any pane (d removes from the list)",
+            ),
             ("<Space>nd", "Open today's daily note"),
             ("<Space><Space>", "Command palette"),
             ("<Space>ai", "Cycle AI card (collapsed / chat / full)"),

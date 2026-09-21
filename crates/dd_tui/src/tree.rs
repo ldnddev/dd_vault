@@ -419,6 +419,12 @@ impl App {
             self.start_pending_ai();
             return;
         }
+        if let ConfirmKind::ForgetVault { name, path } = &kind {
+            let name = name.clone();
+            let path = path.clone();
+            self.forget_vault(&path, &name);
+            return;
+        }
         let Some(vault) = self.vault.clone() else {
             self.modal = None;
             return;
@@ -471,6 +477,9 @@ impl App {
             ConfirmKind::AiSend => {
                 self.modal = None;
                 self.start_pending_ai();
+            }
+            ConfirmKind::ForgetVault { name, path } => {
+                self.forget_vault(&path, &name);
             }
         }
     }

@@ -63,4 +63,14 @@ impl Registry {
         let s = path.to_string_lossy();
         self.vaults.iter().find(|e| e.path == s)
     }
+
+    /// Drop a vault from the list. Does not delete files on disk.
+    pub fn unregister(&mut self, path: &str) -> bool {
+        let before = self.vaults.len();
+        self.vaults.retain(|e| e.path != path);
+        if self.last_path.as_deref() == Some(path) {
+            self.last_path = self.vaults.first().map(|e| e.path.clone());
+        }
+        self.vaults.len() < before
+    }
 }

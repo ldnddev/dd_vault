@@ -1,5 +1,6 @@
 ---
 source: crates/dd_tui/src/tests.rs
+assertion_line: 128
 expression: text
 ---
 ┌ dd_vault ────────────────────────────────────────────────────────────────────────────── no vault ┐

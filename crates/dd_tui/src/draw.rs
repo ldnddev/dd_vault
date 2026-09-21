@@ -478,7 +478,7 @@ fn render_vault_picker(frame: &mut Frame, app: &App) {
     let area = centered_rect(70, 50, frame.area());
     frame.render_widget(Clear, area);
     let block = Block::default()
-        .title(" Open vault  (Enter open  Esc close  j/k) ")
+        .title(" Open vault  (Enter open  d remove  Esc close) ")
         .borders(Borders::ALL)
         .border_style(app.theme.active_border)
         .title_style(

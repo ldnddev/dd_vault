@@ -77,6 +77,10 @@ fn registry_roundtrip_and_last_path() {
 
     registry.register(&vault);
     assert_eq!(registry.vaults.len(), 1);
+
+    assert!(registry.unregister(&vault.root.to_string_lossy()));
+    assert!(registry.vaults.is_empty());
+    assert!(registry.last_path().is_none());
 }
 
 #[test]

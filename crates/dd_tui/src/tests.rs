@@ -184,6 +184,51 @@ fn space_vv_opens_picker() {
 }
 
 #[test]
+fn space_vv_opens_picker_from_editor_and_preview() {
+    let mut app = chrome_app();
+    app.registry.vaults.push(VaultEntry {
+        name: "alpha".into(),
+        path: "/tmp/alpha".into(),
+    });
+    app.pane = Pane::Editor;
+    send_key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
+    assert!(matches!(app.modal, Some(Modal::VaultPicker { .. })));
+    app.modal = None;
+    app.leader = Leader::None;
+    app.pane = Pane::Preview;
+    send_key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
+    assert!(matches!(app.modal, Some(Modal::VaultPicker { .. })));
+}
+
+#[test]
+fn picker_d_unregisters_vault_keeps_folder() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let root = dir.path().join("keep-me");
+    let vault = init(&root).expect("init");
+    let mut app = chrome_app();
+    app.paths = Some(Paths::new(dir.path().join("cfg")));
+    app.set_open_vault(vault);
+    app.toasts.clear();
+    app.open_picker();
+    send_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+    assert!(matches!(
+        app.modal,
+        Some(Modal::Confirm {
+            kind: ConfirmKind::ForgetVault { .. },
+            ..
+        })
+    ));
+    send_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+    assert!(app.registry.vaults.is_empty());
+    assert!(app.vault.is_none());
+    assert!(root.is_dir(), "folder must remain");
+}
+
+#[test]
 fn picker_enter_opens_real_vault() {
     let dir = tempfile::tempdir().expect("tmp");
     let root = dir.path().join("work");
