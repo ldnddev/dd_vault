@@ -1,4 +1,4 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
@@ -27,6 +27,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let footer = Paragraph::new(app.footer_hint(root[2].width)).style(app.theme.app_shell);
     frame.render_widget(footer, root[2]);
+    if app.is_busy() {
+        render_busy_footer(frame, app, root[2]);
+    }
 
     if matches!(app.modal, Some(Modal::VaultPicker { .. })) {
         render_vault_picker(frame, app);
@@ -178,14 +181,40 @@ fn render_ai_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+fn render_busy_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let tick = crate::busy::now_ms();
+    let mut spans = crate::busy::spans(tick, &app.theme);
+    if let Some(kind) = app.busy_status() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            kind,
+            Style::default().fg(app.theme.info),
+        ));
+    }
+    spans.push(Span::raw(" "));
+    frame.render_widget(
+        Paragraph::new(Line::from(spans))
+            .alignment(Alignment::Right)
+            .style(Style::default().bg(app.theme.base_background)),
+        area,
+    );
+}
+
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
+    let tick = crate::busy::now_ms();
+    let mut title = vec![Span::styled(
+        " dd_vault ",
+        Style::default()
+            .fg(app.theme.text_active_focus)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if app.is_busy() {
+        title.push(Span::raw(" "));
+        title.extend(crate::busy::spans(tick, &app.theme));
+        title.push(Span::raw(" "));
+    }
     let header_block = Block::default()
-        .title(Span::styled(
-            " dd_vault ",
-            Style::default()
-                .fg(app.theme.text_active_focus)
-                .add_modifier(Modifier::BOLD),
-        ))
+        .title(Line::from(title))
         .title_top(
             Line::from(Span::styled(
                 app.vault_header_label(),

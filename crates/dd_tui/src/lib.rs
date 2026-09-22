@@ -2,6 +2,7 @@
 
 mod ai;
 mod app;
+mod busy;
 mod draw;
 mod events;
 mod git;

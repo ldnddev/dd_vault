@@ -599,6 +599,12 @@ fn git_commit_modal_and_secret_scan() {
     }
     send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     assert!(app.modal.is_none());
+    let start = std::time::Instant::now();
+    while app.git_rx.is_some() && start.elapsed().as_secs() < 3 {
+        app.poll_git();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    app.poll_git();
     assert!(
         app.editor_title().contains("git:clean"),
         "{}",
@@ -612,6 +618,12 @@ fn git_commit_modal_and_secret_scan() {
         send_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
     }
     send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    let start = std::time::Instant::now();
+    while app.git_rx.is_some() && start.elapsed().as_secs() < 3 {
+        app.poll_git();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    app.poll_git();
     assert!(
         app.toasts
             .iter()
@@ -619,6 +631,17 @@ fn git_commit_modal_and_secret_scan() {
         "{:?}",
         app.toasts.iter().map(|t| &t.message).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn busy_header_shows_dd_loader() {
+    let mut app = chrome_app();
+    let (_tx, rx) = std::sync::mpsc::channel();
+    app.git_rx = Some(rx);
+    app.busy_kind = Some("pushing");
+    let text = buffer_text(&mut app, 100, 24);
+    assert!(text.contains("d_d"), "family loader missing: {text}");
+    assert!(text.contains("pushing") || text.contains("d_d"), "{text}");
 }
 
 #[test]

@@ -10,7 +10,9 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use dd_edit::{Action, Editor};
-use dd_vault_core::{open, FileHit, GitStatus, Index, Paths, Registry, ReindexReport, Vault};
+use dd_vault_core::{
+    open, FileHit, GitOpResult, GitStatus, Index, Paths, Registry, ReindexReport, Vault,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
@@ -160,6 +162,8 @@ pub struct App {
     pub suppress_disk_prompt: Option<PathBuf>,
     pub pending_disk_prompt: Option<PathBuf>,
     pub git: GitStatus,
+    pub git_rx: Option<mpsc::Receiver<Result<(String, GitOpResult), String>>>,
+    pub busy_kind: Option<&'static str>,
     pub ai: AiState,
     pub zen: bool,
     pub focus: bool,
@@ -219,6 +223,8 @@ impl App {
             suppress_disk_prompt: None,
             pending_disk_prompt: None,
             git: GitStatus::default(),
+            git_rx: None,
+            busy_kind: None,
             ai: AiState::default(),
             zen: false,
             focus: false,
@@ -382,6 +388,8 @@ impl App {
         self.tree = TreeState::default();
         self.editor = Editor::empty();
         self.git = GitStatus::default();
+        self.git_rx = None;
+        self.busy_kind = None;
         self.preview_scroll = 0;
     }
 
@@ -738,6 +746,20 @@ impl App {
         };
         parts.join("  ")
     }
+
+    pub fn is_busy(&self) -> bool {
+        self.git_rx.is_some() || self.ai.rx.is_some()
+    }
+
+    pub fn busy_status(&self) -> Option<&'static str> {
+        if self.git_rx.is_some() {
+            return self.busy_kind;
+        }
+        if self.ai.rx.is_some() {
+            return Some("thinking");
+        }
+        None
+    }
 }
 
 pub fn run(initial: Option<Vault>) -> Result<()> {
@@ -771,9 +793,15 @@ where
         app.poll_index();
         app.poll_watch();
         app.poll_ai();
+        app.poll_git();
         crate::toasts::prune_toasts(&mut app.toasts);
         terminal.draw(|frame| crate::draw::draw(frame, app))?;
-        if event::poll(Duration::from_millis(100))? {
+        let wait = if app.is_busy() {
+            Duration::from_millis(80)
+        } else {
+            Duration::from_millis(100)
+        };
+        if event::poll(wait)? {
             app.handle_event(event::read()?)?;
         }
     }

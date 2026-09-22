@@ -52,6 +52,10 @@ impl App {
     }
 
     fn prepare_git_op(&mut self) -> bool {
+        if self.git_rx.is_some() {
+            self.push_toast(ToastLevel::Info, "git is already running");
+            return false;
+        }
         if self.vault.is_none() {
             self.push_toast(ToastLevel::Error, "No vault open");
             return false;
@@ -92,22 +96,33 @@ impl App {
 
     fn run_git_op(
         &mut self,
-        name: &str,
+        name: &'static str,
         op: fn(&GitCtx<'_>) -> Result<GitOpResult, dd_vault_core::Error>,
     ) {
-        let Some(result) = self.with_git_ctx(|ctx| op(&ctx)) else {
+        if !self.prepare_git_op() {
+            return;
+        }
+        let Some((root, extra, cred)) = self.git_job_parts() else {
             return;
         };
-        match result {
-            Ok(res) => self.finish_git_result(name, res),
-            Err(err) => {
-                self.refresh_git();
-                self.push_toast(ToastLevel::Error, err.to_string());
-            }
-        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ctx = GitCtx {
+                root: &root,
+                credentials: cred.as_deref(),
+                extra_secret_patterns: &extra,
+            };
+            let _ = tx.send(op(&ctx).map(|r| (name.to_string(), r)).map_err(|e| e.to_string()));
+        });
+        self.git_rx = Some(rx);
+        self.busy_kind = Some(match name {
+            "pull" => "pulling",
+            "push" => "pushing",
+            _ => "working",
+        });
     }
 
-    fn with_git_ctx<T>(&mut self, f: impl FnOnce(GitCtx<'_>) -> T) -> Option<T> {
+    fn git_job_parts(&mut self) -> Option<(PathBuf, Vec<String>, Option<PathBuf>)> {
         let vault = match &self.vault {
             Some(v) => v.clone(),
             None => {
@@ -124,34 +139,67 @@ impl App {
                 Err(err) => self.push_toast(ToastLevel::Warning, err.to_string()),
             }
         }
-        Some(f(GitCtx {
-            root: &vault.root,
-            credentials: cred_ok.as_deref(),
-            extra_secret_patterns: &extra,
-        }))
+        Some((vault.root, extra, cred_ok))
     }
 
     pub fn submit_git_commit(&mut self, message: String, then_push: bool) {
-        if self.editor.dirty {
-            self.save_note();
-            if self.editor.dirty {
-                return;
-            }
+        if !self.prepare_git_op() {
+            return;
         }
-        let msg = message;
-        let result = self.with_git_ctx(|ctx| commit(&ctx, &msg));
-        let Some(result) = result else {
+        let Some((root, extra, cred)) = self.git_job_parts() else {
             return;
         };
-        match result {
-            Ok(res) => {
-                self.modal = None;
-                self.finish_git_result("commit", res);
+        self.modal = None;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ctx = GitCtx {
+                root: &root,
+                credentials: cred.as_deref(),
+                extra_secret_patterns: &extra,
+            };
+            let result = (|| {
+                let committed = commit(&ctx, &message).map_err(|e| e.to_string())?;
                 if then_push {
-                    self.run_git_op("push", push);
+                    match push(&ctx) {
+                        Ok(pushed) => Ok((
+                            "push".to_string(),
+                            GitOpResult {
+                                message: format!("{}; {}", committed.message, pushed.message),
+                                sidecars: committed.sidecars,
+                                auto_merged: committed.auto_merged,
+                            },
+                        )),
+                        Err(err) => Err(format!("{}; push failed: {err}", committed.message)),
+                    }
+                } else {
+                    Ok(("commit".to_string(), committed))
                 }
+            })();
+            let _ = tx.send(result);
+        });
+        self.git_rx = Some(rx);
+        self.busy_kind = Some(if then_push { "pushing" } else { "committing" });
+    }
+
+    pub fn poll_git(&mut self) {
+        let recv = self.git_rx.as_ref().map(|r| r.try_recv());
+        match recv {
+            Some(Ok(Ok((op, res)))) => {
+                self.git_rx = None;
+                self.busy_kind = None;
+                self.finish_git_result(&op, res);
             }
-            Err(err) => self.push_toast(ToastLevel::Error, err.to_string()),
+            Some(Ok(Err(err))) => {
+                self.git_rx = None;
+                self.busy_kind = None;
+                self.refresh_git();
+                self.push_toast(ToastLevel::Error, err);
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                self.git_rx = None;
+                self.busy_kind = None;
+            }
+            _ => {}
         }
     }
 
