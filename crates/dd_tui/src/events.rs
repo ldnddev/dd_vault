@@ -531,11 +531,15 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
         }
         MouseEventKind::ScrollUp if contains(app.editor_area, m.column, m.row) => {
             app.pane = Pane::Editor;
-            app.editor.scroll = app.editor.scroll.saturating_sub(3);
+            let height = app.editor_text_rows();
+            let width = app.editor_wrap_width();
+            app.editor.scroll_wrapped(-3, height, width);
         }
         MouseEventKind::ScrollDown if contains(app.editor_area, m.column, m.row) => {
             app.pane = Pane::Editor;
-            app.editor.scroll = app.editor.scroll.saturating_add(3);
+            let height = app.editor_text_rows();
+            let width = app.editor_wrap_width();
+            app.editor.scroll_wrapped(3, height, width);
         }
         MouseEventKind::Down(MouseButton::Left) if contains(app.editor_inner, m.column, m.row) => {
             app.pane = Pane::Editor;
@@ -554,19 +558,23 @@ impl App {
         if self.editor.rel.is_none() || self.editor_inner.height == 0 {
             return None;
         }
+        let text_h = self.editor_text_rows();
+        if text_h == 0 {
+            return None;
+        }
         let inner = self.editor_inner;
+        let row = y.saturating_sub(inner.y) as usize;
+        if row >= text_h {
+            return None;
+        }
         let gutter = self.editor.gutter_cols();
-        let row = (y.saturating_sub(inner.y) as usize).min(
-            (inner.height as usize)
-                .saturating_sub(1)
-                .min(self.editor.line_count().saturating_sub(1)),
-        );
-        let line = self.editor.scroll + row;
-        let line = line.min(self.editor.line_count().saturating_sub(1));
         let dx = x.saturating_sub(inner.x);
         let in_gutter = dx < gutter;
-        let col = if in_gutter { 0 } else { (dx - gutter) as usize };
-        Some((line, col, in_gutter))
+        let content_col = if in_gutter { 0 } else { (dx - gutter) as usize };
+        let (line, col) = self
+            .editor
+            .hit_wrapped(row, content_col, self.editor_wrap_width());
+        Some((line, if in_gutter { 0 } else { col }, in_gutter))
     }
 
     pub fn mouse_editor_down(&mut self, x: u16, y: u16) {
@@ -621,10 +629,8 @@ impl App {
             return None;
         }
         let inner = self.editor_inner;
-        let y = y.clamp(
-            inner.y,
-            inner.y.saturating_add(inner.height.saturating_sub(1)),
-        );
+        let text_h = self.editor_text_rows().max(1);
+        let y = y.clamp(inner.y, inner.y.saturating_add((text_h - 1) as u16));
         let x = x.clamp(
             inner.x,
             inner.x.saturating_add(inner.width.saturating_sub(1)),

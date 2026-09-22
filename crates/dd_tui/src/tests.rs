@@ -979,3 +979,101 @@ fn paste_image_without_note_toasts() {
         .collect();
     assert!(extra.is_empty(), "{extra:?}");
 }
+
+fn editor_pane(full: &str, area: ratatui::layout::Rect) -> String {
+    let lines: Vec<&str> = full.lines().collect();
+    let mut out = String::new();
+    for y in area.y..area.y.saturating_add(area.height) {
+        let line = lines.get(y as usize).copied().unwrap_or("");
+        let start = area.x as usize;
+        let row: String = line.chars().skip(start).take(area.width as usize).collect();
+        out.push_str(&row);
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn notes_panel_wraps_long_lines() {
+    let (_dir, mut app) = vault_app();
+    let root = app.vault.as_ref().unwrap().root.clone();
+    let src = format!("{}ZZWRAP", "0123456789".repeat(40));
+    std::fs::write(root.join("notes/hello.md"), &src).unwrap();
+    app.load_note(std::path::PathBuf::from("notes/hello.md"));
+
+    let text = buffer_text(&mut app, 100, 16);
+    let pane = editor_pane(&text, app.editor_inner);
+    assert!(
+        !pane.contains("ZZWRAP"),
+        "end of a long line should be below the fold until the caret moves:\n{pane}"
+    );
+    let width = (app.editor_inner.width - app.editor.gutter_cols()) as usize;
+    let lines: Vec<&str> = pane.lines().collect();
+    let gutter = app.editor.gutter_cols() as usize;
+    let wrapped = lines[1].chars().nth(gutter).unwrap();
+    assert_eq!(
+        wrapped,
+        src.chars().nth(width).unwrap(),
+        "second row should continue the line:\n{pane}"
+    );
+    assert!(
+        lines[1].chars().take(gutter).all(|c| c == ' '),
+        "continuation row should not repeat the line number:\n{pane}"
+    );
+
+    let inner = app.editor_inner;
+    app.handle_event(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: inner.x + app.editor.gutter_cols(),
+        row: inner.y + 1,
+        modifiers: KeyModifiers::NONE,
+    }))
+    .expect("click");
+    app.handle_event(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: inner.x + app.editor.gutter_cols(),
+        row: inner.y + 1,
+        modifiers: KeyModifiers::NONE,
+    }))
+    .expect("up");
+    assert_eq!(app.editor.cursor_line_col(), (0, width));
+
+    send_key(&mut app, KeyCode::Char('$'), KeyModifiers::NONE);
+    let text = buffer_text(&mut app, 100, 16);
+    let pane = editor_pane(&text, app.editor_inner);
+    assert!(
+        pane.contains("ZZWRAP"),
+        "caret at end of a wrapped line should scroll that row into view:\n{pane}"
+    );
+    assert!(
+        app.editor.scroll_off > 0,
+        "scroll_off {}",
+        app.editor.scroll_off
+    );
+}
+
+#[test]
+fn notes_panel_wrap_can_be_disabled() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let root = dir.path().join("plain");
+    let vault = init(&root).expect("init");
+    std::fs::write(vault.meta_dir.join("config.toml"), "wrap = false\n").unwrap();
+    let mut app = chrome_app();
+    app.paths = Some(Paths::new(dir.path().join("cfg")));
+    app.set_open_vault(vault);
+    app.toasts.clear();
+    assert!(!app.wrap_notes);
+
+    let root = app.vault.as_ref().unwrap().root.clone();
+    let src = format!("{}ZZWRAP", "0123456789".repeat(40));
+    std::fs::write(root.join("notes/hello.md"), &src).unwrap();
+    app.load_note(std::path::PathBuf::from("notes/hello.md"));
+    send_key(&mut app, KeyCode::Char('$'), KeyModifiers::NONE);
+    let text = buffer_text(&mut app, 100, 16);
+    let pane = editor_pane(&text, app.editor_inner);
+    assert!(
+        !pane.contains("ZZWRAP"),
+        "wrap = false should clip the notes pane:\n{pane}"
+    );
+    assert_eq!(app.editor.scroll_off, 0);
+}

@@ -90,6 +90,8 @@ pub struct Editor {
     pub rel: Option<String>,
     pub dirty: bool,
     pub scroll: usize,
+    /// Visual rows of `scroll`'s buffer line that sit above the viewport.
+    pub scroll_off: usize,
     undo: Vec<(Rope, usize)>,
     undo_at: usize,
     visual_anchor: Option<usize>,
@@ -124,6 +126,7 @@ impl Editor {
             rel: None,
             dirty: false,
             scroll: 0,
+            scroll_off: 0,
             visual_anchor: None,
             visual_line: false,
             unnamed: Yank::default(),
@@ -247,20 +250,166 @@ impl Editor {
     }
 
     pub fn ensure_scroll(&mut self, height: usize) {
+        self.ensure_scroll_wrapped(height, usize::MAX);
+    }
+
+    /// Keep the caret's wrapped row on screen. `width` is the text columns
+    /// available beside the gutter; `usize::MAX` disables wrapping.
+    pub fn ensure_scroll_wrapped(&mut self, height: usize, width: usize) {
         if height == 0 {
             return;
         }
-        let (line, _) = self.cursor_line_col();
-        if line < self.scroll {
-            self.scroll = line;
+        let width = Self::view_width(width);
+        let caret = self.caret_pos();
+        let cursor_at = self.flat_of(caret.0, Self::row_of(caret.1, width), width, caret);
+        let mut origin = self.origin_flat(width, caret);
+        if cursor_at < origin {
+            origin = cursor_at;
+        } else if cursor_at >= origin.saturating_add(height) {
+            origin = cursor_at + 1 - height;
         }
-        if line >= self.scroll + height {
-            self.scroll = line + 1 - height;
+        let max_origin = self.total_rows(width, caret).saturating_sub(height);
+        if origin > max_origin {
+            origin = max_origin;
         }
-        let max = self.line_count().saturating_sub(height);
-        if self.scroll > max {
-            self.scroll = max;
+        self.set_origin(origin, width, caret);
+    }
+
+    /// Move the viewport by `delta` visual rows, then pull it back so the caret stays visible.
+    pub fn scroll_wrapped(&mut self, delta: isize, height: usize, width: usize) {
+        if height == 0 {
+            return;
         }
+        let width = Self::view_width(width);
+        let caret = self.caret_pos();
+        let origin = (self.origin_flat(width, caret) as isize + delta).max(0) as usize;
+        self.set_origin(origin, width, caret);
+        self.ensure_scroll_wrapped(height, width);
+    }
+
+    /// Map a viewport row and a column inside the text (not the gutter) to a buffer position.
+    pub fn hit_wrapped(&self, view_row: usize, content_col: usize, width: usize) -> (usize, usize) {
+        let width = Self::view_width(width);
+        let caret = self.caret_pos();
+        let last = self.line_count().saturating_sub(1);
+        let mut idx = self.scroll.min(last);
+        let mut off = self.scroll_off;
+        let mut row_left = view_row;
+        loop {
+            let rows = self.line_rows_at(idx, width, caret);
+            let off_clamped = off.min(rows.saturating_sub(1));
+            let visible = rows - off_clamped;
+            if row_left < visible || idx == last {
+                let wrap_row = off_clamped + row_left.min(visible.saturating_sub(1));
+                let col = if width == usize::MAX {
+                    content_col
+                } else {
+                    wrap_row.saturating_mul(width).saturating_add(content_col)
+                };
+                return (idx, col);
+            }
+            row_left -= visible;
+            off = 0;
+            idx += 1;
+        }
+    }
+
+    fn view_width(width: usize) -> usize {
+        if width == 0 {
+            1
+        } else {
+            width
+        }
+    }
+
+    fn caret_pos(&self) -> (usize, usize) {
+        self.cursor_line_col()
+    }
+
+    fn row_of(col: usize, width: usize) -> usize {
+        if width == usize::MAX {
+            0
+        } else {
+            col / width
+        }
+    }
+
+    fn line_char_len(&self, idx: usize) -> usize {
+        let lines = self.rope.len_lines();
+        if idx >= lines {
+            return 0;
+        }
+        let start = self.rope.line_to_char(idx);
+        let end = if idx + 1 >= lines {
+            self.rope.len_chars()
+        } else {
+            self.rope.line_to_char(idx + 1)
+        };
+        let mut len = end.saturating_sub(start);
+        if len > 0 && self.rope.char(end - 1) == '\n' {
+            len -= 1;
+            if len > 0 && self.rope.char(start + len - 1) == '\r' {
+                len -= 1;
+            }
+        }
+        len
+    }
+
+    /// Visual rows this buffer line occupies, including the insert caret past a full row.
+    fn line_rows_at(&self, idx: usize, width: usize, caret: (usize, usize)) -> usize {
+        let len = self.line_char_len(idx);
+        let base = if width == usize::MAX || len == 0 {
+            1
+        } else {
+            len.div_ceil(width)
+        };
+        if idx == caret.0 {
+            base.max(Self::row_of(caret.1, width) + 1)
+        } else {
+            base
+        }
+    }
+
+    fn total_rows(&self, width: usize, caret: (usize, usize)) -> usize {
+        (0..self.line_count())
+            .map(|i| self.line_rows_at(i, width, caret))
+            .sum()
+    }
+
+    fn flat_of(&self, line: usize, row: usize, width: usize, caret: (usize, usize)) -> usize {
+        let line = line.min(self.line_count().saturating_sub(1));
+        let mut n = 0usize;
+        for i in 0..line {
+            n += self.line_rows_at(i, width, caret);
+        }
+        let rows = self.line_rows_at(line, width, caret);
+        n + row.min(rows.saturating_sub(1))
+    }
+
+    fn origin_flat(&self, width: usize, caret: (usize, usize)) -> usize {
+        let last = self.line_count().saturating_sub(1);
+        let scroll = self.scroll.min(last);
+        let mut n = 0usize;
+        for i in 0..scroll {
+            n += self.line_rows_at(i, width, caret);
+        }
+        let rows = self.line_rows_at(scroll, width, caret);
+        n + self.scroll_off.min(rows.saturating_sub(1))
+    }
+
+    fn set_origin(&mut self, mut flat: usize, width: usize, caret: (usize, usize)) {
+        let nlines = self.line_count();
+        for i in 0..nlines {
+            let rows = self.line_rows_at(i, width, caret);
+            if flat < rows || i + 1 == nlines {
+                self.scroll = i;
+                self.scroll_off = flat.min(rows.saturating_sub(1));
+                return;
+            }
+            flat -= rows;
+        }
+        self.scroll = 0;
+        self.scroll_off = 0;
     }
 
     pub fn mark_saved(&mut self) {
@@ -273,6 +422,7 @@ impl Editor {
         let rel = self.rel.clone().ok_or(Error::NoPath)?;
         let cursor = self.cursor;
         let scroll = self.scroll;
+        let scroll_off = self.scroll_off;
         let preferred = self.preferred_col;
         let mode = self.mode;
         let next = Self::open(path, rel)?;
@@ -283,6 +433,7 @@ impl Editor {
         self.dirty = false;
         self.cursor = cursor.min(len);
         self.scroll = scroll;
+        self.scroll_off = scroll_off;
         self.preferred_col = preferred;
         self.mode = match mode {
             Mode::Insert | Mode::Normal => mode,

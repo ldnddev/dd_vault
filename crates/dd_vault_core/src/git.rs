@@ -210,11 +210,7 @@ fn push_now(ctx: &GitCtx<'_>) -> Result<GitOpResult, Error> {
     if looks_like_no_upstream(&err) {
         let remotes = run_git_ok(ctx.root, &["remote"], ctx.credentials).unwrap_or_default();
         if remotes.lines().any(|r| r.trim() == "origin") {
-            let out2 = run_git(
-                ctx.root,
-                &["push", "-u", "origin", "HEAD"],
-                ctx.credentials,
-            )?;
+            let out2 = run_git(ctx.root, &["push", "-u", "origin", "HEAD"], ctx.credentials)?;
             if out2.status.success() {
                 return Ok(GitOpResult {
                     message: "Pushed (upstream set to origin)".into(),
@@ -502,9 +498,8 @@ fn unmerged_paths(root: &Path) -> Result<Vec<String>, Error> {
 }
 
 fn skip_git_rel(rel: &str) -> bool {
-    rel.split(['/', '\\']).any(|part| {
-        skip_dir_name(part) || skip_file_name(part) || is_metadata_dirname(part)
-    })
+    rel.split(['/', '\\'])
+        .any(|part| skip_dir_name(part) || skip_file_name(part) || is_metadata_dirname(part))
 }
 
 fn ensure_meta_gitignore(root: &Path) {

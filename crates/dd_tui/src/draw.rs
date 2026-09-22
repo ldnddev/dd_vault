@@ -186,10 +186,7 @@ fn render_busy_footer(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = crate::busy::spans(tick, &app.theme);
     if let Some(kind) = app.busy_status() {
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            kind,
-            Style::default().fg(app.theme.info),
-        ));
+        spans.push(Span::styled(kind, Style::default().fg(app.theme.info)));
     }
     spans.push(Span::raw(" "));
     frame.render_widget(
@@ -791,7 +788,6 @@ fn render_preview(frame: &mut Frame, app: &mut App, border: ratatui::style::Colo
 }
 
 fn render_editor(frame: &mut Frame, app: &mut App, editor_border: ratatui::style::Color) {
-    use crate::highlight::highlight_line;
     use dd_edit::Mode;
 
     let block = Block::default()
@@ -816,7 +812,8 @@ fn render_editor(frame: &mut Frame, app: &mut App, editor_border: ratatui::style
     } else {
         inner.height
     };
-    app.editor.ensure_scroll(text_h as usize);
+    app.editor
+        .ensure_scroll_wrapped(text_h as usize, app.editor_wrap_width());
 
     if app.editor.rel.is_none() {
         frame.render_widget(
@@ -834,40 +831,7 @@ fn render_editor(frame: &mut Frame, app: &mut App, editor_border: ratatui::style
         return;
     }
 
-    let (cur_line, cur_col) = app.editor.cursor_line_col();
-    let visual = app.editor.visual_highlight();
-    let lines_n = app.editor.line_count();
-    let gutter_w = app.editor.gutter_cols().saturating_sub(1) as usize;
-    let mut lines: Vec<Line> = Vec::new();
-    for row in 0..text_h as usize {
-        let idx = app.editor.scroll + row;
-        if idx >= lines_n {
-            lines.push(Line::from(""));
-            continue;
-        }
-        let gutter = Span::styled(
-            format!("{:>gutter_w$} ", idx + 1),
-            Style::default().fg(app.theme.text_secondary),
-        );
-        let raw = app.editor.line(idx);
-        let mut content = highlight_line(&raw, &app.theme);
-        if let Some((a, b)) = visual {
-            let start = line_char_start(&app.editor, idx);
-            content = apply_selection(content, start, a, b, &app.theme);
-        }
-        let mut spans = vec![gutter];
-        if idx == cur_line {
-            spans.extend(with_cursor(
-                content,
-                cur_col,
-                &app.theme,
-                app.editor.mode == Mode::Insert,
-            ));
-        } else {
-            spans.extend(content.spans);
-        }
-        lines.push(Line::from(spans));
-    }
+    let lines = editor_visual_lines(app, text_h as usize);
     let text_area = Rect {
         x: inner.x,
         y: inner.y,
@@ -904,6 +868,100 @@ fn render_editor(frame: &mut Frame, app: &mut App, editor_border: ratatui::style
             cmd_area,
         );
     }
+}
+
+fn editor_visual_lines(app: &App, text_h: usize) -> Vec<Line<'static>> {
+    use crate::highlight::highlight_line;
+    use dd_edit::Mode;
+
+    let (cur_line, cur_col) = app.editor.cursor_line_col();
+    let visual = app.editor.visual_highlight();
+    let lines_n = app.editor.line_count();
+    let gutter_w = app.editor.gutter_cols().saturating_sub(1) as usize;
+    let wrap_w = app.editor_wrap_width();
+    let insert = app.editor.mode == Mode::Insert;
+    let gutter_style = Style::default().fg(app.theme.text_secondary);
+    let (cur_row, local_col) = if wrap_w == usize::MAX {
+        (0, cur_col)
+    } else {
+        (cur_col / wrap_w, cur_col % wrap_w)
+    };
+
+    let mut lines = Vec::new();
+    let mut buf_idx = app.editor.scroll;
+    let mut skip = app.editor.scroll_off;
+    while lines.len() < text_h && buf_idx < lines_n {
+        let raw = app.editor.line(buf_idx);
+        let mut content = highlight_line(&raw, &app.theme);
+        if let Some((a, b)) = visual {
+            let start = line_char_start(&app.editor, buf_idx);
+            content = apply_selection(content, start, a, b, &app.theme);
+        }
+        let chunks = split_spans(&content, wrap_w);
+        let extra = buf_idx == cur_line && cur_row >= chunks.len();
+        let total_rows = chunks.len() + usize::from(extra);
+        let mut row_i = skip.min(total_rows);
+        while row_i < total_rows && lines.len() < text_h {
+            let mut spans = vec![gutter_span(row_i == 0, buf_idx + 1, gutter_w, gutter_style)];
+            let chunk = if row_i < chunks.len() {
+                chunks[row_i].clone()
+            } else {
+                Vec::new()
+            };
+            if buf_idx == cur_line && row_i == cur_row {
+                spans.extend(with_cursor(
+                    Line::from(chunk),
+                    local_col,
+                    &app.theme,
+                    insert,
+                ));
+            } else {
+                spans.extend(chunk);
+            }
+            lines.push(Line::from(spans));
+            row_i += 1;
+        }
+        skip = 0;
+        buf_idx += 1;
+    }
+    lines
+}
+
+fn gutter_span(show_num: bool, line_no: usize, gutter_w: usize, style: Style) -> Span<'static> {
+    let text = if show_num {
+        format!("{:>gutter_w$} ", line_no)
+    } else {
+        " ".repeat(gutter_w + 1)
+    };
+    Span::styled(text, style)
+}
+
+/// Break a highlighted line into rows of `width` characters. `usize::MAX` keeps one row.
+fn split_spans(line: &Line<'_>, width: usize) -> Vec<Vec<Span<'static>>> {
+    let width = if width == 0 { 1 } else { width };
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut filled = 0usize;
+    for span in &line.spans {
+        let chars: Vec<char> = span.content.chars().collect();
+        let mut i = 0usize;
+        while i < chars.len() {
+            if filled == width {
+                rows.push(std::mem::take(&mut current));
+                filled = 0;
+            }
+            let room = width - filled;
+            let take = room.min(chars.len() - i);
+            let chunk: String = chars[i..i + take].iter().collect();
+            current.push(Span::styled(chunk, span.style));
+            filled += take;
+            i += take;
+        }
+    }
+    if rows.is_empty() || !current.is_empty() {
+        rows.push(current);
+    }
+    rows
 }
 
 fn apply_selection(
@@ -1108,9 +1166,7 @@ fn render_prompt(frame: &mut Frame, app: &App) {
         }
         PromptKind::Rename { rel } => format!(" Rename {} ", rel.display()),
         PromptKind::GitCommit { then_push: false } => " Git commit message ".to_string(),
-        PromptKind::GitCommit { then_push: true } => {
-            " Commit all changes, then push ".to_string()
-        }
+        PromptKind::GitCommit { then_push: true } => " Commit all changes, then push ".to_string(),
     };
     let area = centered_rect(70, 30, frame.area());
     frame.render_widget(Clear, area);

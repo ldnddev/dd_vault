@@ -150,6 +150,8 @@ pub struct App {
     pub mouse_drag: Option<MouseDrag>,
     pub editor: Editor,
     pub editor_inner: Rect,
+    /// Soft-wrap the notes pane. Loaded from the vault `wrap` setting. Preview always wraps.
+    pub wrap_notes: bool,
     pub preview_visible: bool,
     pub preview_scroll: u16,
     pub preview_area: Rect,
@@ -211,6 +213,7 @@ impl App {
             mouse_drag: None,
             editor: Editor::empty(),
             editor_inner: Rect::default(),
+            wrap_notes: true,
             preview_visible: true,
             preview_scroll: 0,
             preview_area: Rect::default(),
@@ -277,6 +280,7 @@ impl App {
     }
 
     pub fn set_open_vault(&mut self, vault: Vault) {
+        self.wrap_notes = dd_vault_core::VaultConfig::load(&vault.meta_dir).wrap;
         self.registry.register(&vault);
         self.persist_registry();
         self.tree = TreeState::load(&vault);
@@ -408,6 +412,31 @@ impl App {
 
     pub fn push_toast(&mut self, level: ToastLevel, message: impl Into<String>) {
         crate::toasts::push_toast(&mut self.toasts, level, message);
+    }
+
+    /// Rows of the notes pane that show buffer text (the command line takes the last row).
+    pub fn editor_text_rows(&self) -> usize {
+        let h = self.editor_inner.height as usize;
+        if h == 0 {
+            return 0;
+        }
+        if matches!(
+            self.editor.mode,
+            dd_edit::Mode::Command | dd_edit::Mode::Search
+        ) {
+            h.saturating_sub(1)
+        } else {
+            h
+        }
+    }
+
+    /// Columns available for note text. `usize::MAX` means do not wrap.
+    pub fn editor_wrap_width(&self) -> usize {
+        if !self.wrap_notes {
+            return usize::MAX;
+        }
+        let gutter = self.editor.gutter_cols();
+        (self.editor_inner.width.saturating_sub(gutter) as usize).max(1)
     }
 
     pub fn editor_title(&self) -> String {

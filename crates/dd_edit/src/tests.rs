@@ -259,3 +259,69 @@ fn marks_jump() {
     e.handle(Key::Char('a'));
     assert_eq!(e.cursor_line_col().0, 1);
 }
+
+#[test]
+fn wrap_keeps_caret_row_on_screen() {
+    let mut e = ed(&"a".repeat(25));
+    e.handle(Key::Char('$'));
+    assert_eq!(e.cursor_line_col(), (0, 24));
+    e.ensure_scroll_wrapped(2, 10);
+    assert_eq!(e.scroll, 0);
+    assert_eq!(e.scroll_off, 1);
+}
+
+#[test]
+fn wrap_insert_past_full_row_gets_its_own_row() {
+    let mut e = Editor::empty();
+    e.handle(Key::Char('i'));
+    for _ in 0..10 {
+        e.handle(Key::Char('a'));
+    }
+    assert_eq!(e.cursor_line_col(), (0, 10));
+    e.ensure_scroll_wrapped(1, 10);
+    assert_eq!(e.scroll, 0);
+    assert_eq!(e.scroll_off, 1);
+    e.ensure_scroll_wrapped(2, 10);
+    assert_eq!(e.scroll_off, 0);
+}
+
+#[test]
+fn wrap_hit_maps_screen_row_to_column() {
+    let e = ed(&format!("{}\n{}", "a".repeat(25), "bbb"));
+    assert_eq!(e.hit_wrapped(0, 3, 10), (0, 3));
+    assert_eq!(e.hit_wrapped(1, 0, 10), (0, 10));
+    assert_eq!(e.hit_wrapped(2, 4, 10), (0, 24));
+    assert_eq!(e.hit_wrapped(3, 1, 10), (1, 1));
+}
+
+#[test]
+fn wrap_scroll_moves_by_visual_rows() {
+    let mut e = Editor::empty();
+    e.handle(Key::Char('i'));
+    for _ in 0..50 {
+        e.handle(Key::Char('a'));
+    }
+    e.handle(Key::Esc);
+    e.handle(Key::Char('0'));
+    e.handle(Key::Char('2'));
+    e.handle(Key::Char('0'));
+    e.handle(Key::Char('l'));
+    assert_eq!(e.cursor_line_col(), (0, 20));
+    e.ensure_scroll_wrapped(3, 10);
+    assert_eq!(e.scroll_off, 0);
+    e.scroll_wrapped(1, 3, 10);
+    assert_eq!(e.scroll, 0);
+    assert_eq!(e.scroll_off, 1);
+    e.scroll_wrapped(20, 3, 10);
+    assert_eq!(e.scroll_off, 2);
+}
+
+#[test]
+fn unwrapped_scroll_still_tracks_buffer_lines() {
+    let mut e = ed("a\nb\nc\nd\ne");
+    e.handle(Key::Char('G'));
+    e.scroll_off = 4;
+    e.ensure_scroll_wrapped(2, usize::MAX);
+    assert_eq!(e.scroll, 3);
+    assert_eq!(e.scroll_off, 0);
+}

@@ -112,7 +112,11 @@ impl App {
                 credentials: cred.as_deref(),
                 extra_secret_patterns: &extra,
             };
-            let _ = tx.send(op(&ctx).map(|r| (name.to_string(), r)).map_err(|e| e.to_string()));
+            let _ = tx.send(
+                op(&ctx)
+                    .map(|r| (name.to_string(), r))
+                    .map_err(|e| e.to_string()),
+            );
         });
         self.git_rx = Some(rx);
         self.busy_kind = Some(match name {
