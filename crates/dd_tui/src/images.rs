@@ -66,6 +66,19 @@ impl App {
         self.refresh_git();
         self.push_toast(ToastLevel::Success, format!("Pasted {}", rel.display()));
     }
+
+    /// `y`, `yy`, and visual `y`: put the yanked text on the OS clipboard.
+    pub fn copy_text_to_clipboard(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+            Ok(()) => {}
+            Err(err) => {
+                self.push_toast(ToastLevel::Warning, format!("Clipboard copy failed: {err}"));
+            }
+        }
+    }
 }
 
 fn note_stem(rel: Option<&str>) -> String {

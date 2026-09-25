@@ -78,6 +78,8 @@ pub enum Action {
     AiPrompt(String),
     Error(String),
     Info(String),
+    /// Yanked text (`y`, `yy`, visual `y`) for the OS clipboard.
+    CopyClipboard(String),
 }
 
 #[derive(Clone, Debug)]
@@ -577,8 +579,7 @@ impl Editor {
             (Pending::Y, Key::Char('y')) => {
                 self.pending = Pending::None;
                 let n = self.take_count();
-                self.yank_lines(n);
-                return Action::None;
+                return self.yank_lines(n);
             }
             (Pending::D, key) => {
                 self.pending = Pending::None;
@@ -590,7 +591,7 @@ impl Editor {
             (Pending::Y, key) => {
                 self.pending = Pending::None;
                 if let Some(end) = self.motion_end(key) {
-                    self.yank_range(self.cursor.min(end), self.cursor.max(end), false);
+                    return self.yank_range(self.cursor.min(end), self.cursor.max(end), false);
                 }
                 return Action::None;
             }
@@ -750,10 +751,10 @@ impl Editor {
             }
             Key::Char('y') => {
                 let (a, b, linewise) = self.visual_range();
-                self.yank_range(a, b, linewise);
+                let action = self.yank_range(a, b, linewise);
                 self.mode = Mode::Normal;
                 self.visual_anchor = None;
-                Action::None
+                action
             }
             other => {
                 self.apply_motion_key(other);
@@ -1117,11 +1118,17 @@ impl Editor {
         self.unnamed = yank;
     }
 
-    fn yank_range(&mut self, a: usize, b: usize, linewise: bool) {
+    fn yank_range(&mut self, a: usize, b: usize, linewise: bool) -> Action {
         let a = a.min(self.rope.len_chars());
         let b = b.min(self.rope.len_chars()).max(a);
         let text = self.rope.slice(a..b).to_string();
+        let copy = if text.is_empty() {
+            Action::None
+        } else {
+            Action::CopyClipboard(text.clone())
+        };
         self.store_yank(Yank { text, linewise });
+        copy
     }
 
     fn delete_range(&mut self, a: usize, b: usize, linewise: bool) {
@@ -1151,7 +1158,7 @@ impl Editor {
         self.delete_range(start, end, true);
     }
 
-    fn yank_lines(&mut self, n: usize) {
+    fn yank_lines(&mut self, n: usize) -> Action {
         let line = self.cursor_line_col().0;
         let start = self.line_start(line);
         let end_line = (line + n).min(self.line_count());
@@ -1160,7 +1167,7 @@ impl Editor {
         } else {
             self.line_start(end_line)
         };
-        self.yank_range(start, end, true);
+        self.yank_range(start, end, true)
     }
 
     fn paste(&mut self, before: bool) {

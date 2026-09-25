@@ -89,6 +89,44 @@ fn dd_yy_p_and_undo() {
 }
 
 #[test]
+fn yy_copies_to_clipboard_action() {
+    let mut e = ed("one\ntwo");
+    assert_eq!(e.handle(Key::Char('y')), Action::None);
+    assert_eq!(
+        e.handle(Key::Char('y')),
+        Action::CopyClipboard("one\n".into())
+    );
+}
+
+#[test]
+fn motion_and_visual_yank_copy_clipboard() {
+    let mut e = ed("foo bar");
+    assert_eq!(e.handle(Key::Char('y')), Action::None);
+    assert_eq!(
+        e.handle(Key::Char('w')),
+        Action::CopyClipboard("foo ".into())
+    );
+
+    let mut e = ed("hello");
+    e.handle(Key::Char('v'));
+    e.handle(Key::Char('l'));
+    e.handle(Key::Char('l'));
+    assert_eq!(
+        e.handle(Key::Char('y')),
+        Action::CopyClipboard("hel".into())
+    );
+    assert_eq!(e.mode, Mode::Normal);
+}
+
+#[test]
+fn delete_stays_off_the_system_clipboard() {
+    let mut e = ed("one\ntwo");
+    assert_eq!(e.handle(Key::Char('d')), Action::None);
+    assert_eq!(e.handle(Key::Char('d')), Action::None);
+    assert!(!e.text().starts_with("one"));
+}
+
+#[test]
 fn word_motions() {
     let mut e = ed("foo bar");
     e.handle(Key::Char('w'));

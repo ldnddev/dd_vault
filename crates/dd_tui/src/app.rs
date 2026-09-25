@@ -529,6 +529,7 @@ impl App {
             Action::AiOn => self.ai_enable(),
             Action::AiOff => self.ai_disable(),
             Action::AiPrompt(p) => self.request_ai(p, None),
+            Action::CopyClipboard(text) => self.copy_text_to_clipboard(&text),
         }
     }
 

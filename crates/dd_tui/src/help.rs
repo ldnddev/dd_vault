@@ -160,7 +160,10 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
             ("w b e  0 $  gg G", "Words / line / file"),
             ("i a o O", "Insert"),
             ("v V", "Visual / linewise"),
-            ("dd yy p P", "Delete / yank / paste line"),
+            (
+                "dd yy p P",
+                "Delete / yank / paste (y and yy copy to the system clipboard)",
+            ),
             ("u  Ctrl+R", "Undo / redo"),
             ("/ n N", "Search"),
             ("m{a-z}  `{a-z}", "Marks"),
@@ -216,7 +219,7 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
     );
     lines.push(Line::from(Span::styled("Notes", h_style)));
     lines.push(Line::from(""));
-    let note = "Chrome follows LDNDDEV_TUI_VISUAL_STANDARD.md. Header is always 3 rows and footer 1, including zen. The tree is files on disk; .dd_vault-*, .git, .gitignore, and db files are hidden. External edits reload a clean buffer, or prompt Reload/Keep if dirty. Editor title shows git:clean / git:±N / git:conflict. :git commit scans for ghp_ / github_pat_ / AKIA. Overlapping pull conflicts write note.conflict-<ts>.md sidecars and keep the original. Ctrl+V pastes a clipboard image to assets/<note>-<ts>.png. Click/drag in the editor to place the caret or select; drag the pane borders to resize. :daily and <Space>nd open notes/daily/YYYY-MM-DD.md. <Space><Space> is the command palette. Search matches frontmatter titles and aliases. AI is off until :ai on; each request asks consent. SpaceXAI (grok-4.6) is the default network provider. Narrow terminals hide the tree until <Space>e.";
+    let note = "Chrome follows LDNDDEV_TUI_VISUAL_STANDARD.md. Header is always 3 rows and footer 1, including zen. The tree is files on disk; .dd_vault-*, .git, .gitignore, and db files are hidden. External edits reload a clean buffer, or prompt Reload/Keep if dirty. Editor title shows git:clean / git:±N / git:conflict. :git commit scans for ghp_ / github_pat_ / AKIA. Overlapping pull conflicts write note.conflict-<ts>.md sidecars and keep the original. Ctrl+V pastes a clipboard image to assets/<note>-<ts>.png. Click/drag in the editor to place the caret or select; y on that selection copies it to the system clipboard. Drag the pane borders to resize. :daily and <Space>nd open notes/daily/YYYY-MM-DD.md. <Space><Space> is the command palette. Search matches frontmatter titles and aliases. AI is off until :ai on; each request asks consent. SpaceXAI (grok-4.6) is the default network provider. Narrow terminals hide the tree until <Space>e.";
     for chunk in wrap_to_lines(note, width.saturating_sub(2)) {
         lines.push(Line::from(Span::raw(format!("  {chunk}"))));
     }
