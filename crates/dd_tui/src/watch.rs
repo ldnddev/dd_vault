@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use notify::event::{AccessKind, AccessMode, EventKind};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::app::{App, ConfirmKind, Modal};
@@ -41,6 +42,12 @@ impl VaultWatch {
 
     fn drain(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
+            if !is_watch_content_kind(ev.kind) {
+                continue;
+            }
+            if ev.paths.is_empty() {
+                continue;
+            }
             self.pending.extend(ev.paths);
             self.deadline = Some(Instant::now() + WATCH_DEBOUNCE);
         }
@@ -57,6 +64,21 @@ impl VaultWatch {
         } else {
             Some(std::mem::take(&mut self.pending))
         }
+    }
+
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+}
+
+/// Keep create/modify/remove/rename (and close-after-write). Drop OPEN and other
+/// access events so our own reads do not retrigger a disk-change prompt.
+pub(crate) fn is_watch_content_kind(kind: EventKind) -> bool {
+    match kind {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        EventKind::Other => false,
+        EventKind::Any | EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => true,
     }
 }
 
@@ -85,21 +107,24 @@ impl App {
         }
     }
 
-    pub fn poll_watch(&mut self) {
+    pub fn poll_watch(&mut self) -> bool {
+        let mut changed = false;
         let paths = self.watch.as_mut().and_then(VaultWatch::take_ready);
         if let Some(paths) = paths {
-            self.handle_fs_changes(&paths);
+            changed = self.handle_fs_changes(&paths);
         }
         if self.modal.is_none() {
             if let Some(rel) = self.pending_disk_prompt.take() {
                 self.prompt_disk_change(rel);
+                changed = true;
             }
         }
+        changed
     }
 
-    pub fn handle_fs_changes(&mut self, abs_paths: &[PathBuf]) {
+    pub fn handle_fs_changes(&mut self, abs_paths: &[PathBuf]) -> bool {
         let Some(vault) = self.vault.clone() else {
-            return;
+            return false;
         };
         let mut rels = Vec::new();
         for abs in abs_paths {
@@ -110,7 +135,7 @@ impl App {
             }
         }
         if rels.is_empty() {
-            return;
+            return false;
         }
         self.reload_tree();
         self.refresh_git();
@@ -124,6 +149,7 @@ impl App {
                 self.on_open_file_changed(&vault.root, &open_path);
             }
         }
+        true
     }
 
     pub(crate) fn queue_reindex(&mut self) {

@@ -274,6 +274,7 @@ impl App {
     pub fn reload_tree(&mut self) {
         if let Some(vault) = &self.vault {
             self.tree.reload(vault);
+            self.preview_epoch = self.preview_epoch.wrapping_add(1);
         }
     }
 
@@ -361,7 +362,7 @@ impl App {
                             self.tree.collapsed.remove(&parent);
                             self.tree.select_rel(&rel);
                             if !is_dir {
-                                self.load_note(rel.clone());
+                                self.open_file(rel.clone());
                             }
                             self.refresh_git();
                             self.push_toast(
@@ -450,8 +451,11 @@ impl App {
                 self.editor.dirty = false;
                 match next {
                     crate::app::DiscardNext::Quit => self.should_quit = true,
-                    crate::app::DiscardNext::Open(rel) => self.load_note(rel),
+                    crate::app::DiscardNext::Navigate(to) => self.navigate_clean(to),
                 }
+            }
+            ConfirmKind::CreateNote { rel, heading } => {
+                self.create_and_open_note(rel, heading);
             }
             ConfirmKind::ReloadDisk { rel } => {
                 self.modal = None;

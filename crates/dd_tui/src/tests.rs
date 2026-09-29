@@ -1,13 +1,18 @@
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
-use crate::app::{App, ConfirmKind, FinderKind, Leader, Modal, Pane};
+use crate::app::{
+    App, ConfirmKind, FinderKind, Leader, Modal, Pane, BUSY_POLL, CHANNEL_POLL, REST_POLL,
+};
 use crate::theme::AppTheme;
 use crate::toasts::ToastLevel;
-use dd_vault_core::{init, Paths, Registry, Vault, VaultEntry};
+use crate::watch::is_watch_content_kind;
+use dd_vault_core::{init, Paths, Registry, ReindexReport, Vault, VaultEntry};
+use notify::event::{AccessKind, AccessMode, DataChange, EventKind, ModifyKind};
+use std::time::Duration;
 
 fn send_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.handle_event(Event::Key(KeyEvent::new(code, modifiers)))
@@ -1076,4 +1081,319 @@ fn notes_panel_wrap_can_be_disabled() {
         "wrap = false should clip the notes pane:\n{pane}"
     );
     assert_eq!(app.editor.scroll_off, 0);
+}
+
+#[test]
+fn poll_timeout_rests_without_pending_work() {
+    let app = chrome_app();
+    assert_eq!(app.poll_timeout(), REST_POLL);
+}
+
+#[test]
+fn poll_timeout_is_busy_frame_when_git_runs() {
+    let mut app = chrome_app();
+    let (_tx, rx) = std::sync::mpsc::channel();
+    app.git_rx = Some(rx);
+    assert_eq!(app.poll_timeout(), BUSY_POLL);
+}
+
+#[test]
+fn poll_timeout_wakes_for_index_and_toasts() {
+    let mut app = chrome_app();
+    let (_tx, rx) = std::sync::mpsc::channel();
+    app.index_rx = Some(rx);
+    assert_eq!(app.poll_timeout(), CHANNEL_POLL);
+
+    let mut app = chrome_app();
+    app.push_toast(ToastLevel::Info, "hi");
+    let wait = app.poll_timeout();
+    assert!(wait <= crate::toasts::TOAST_TTL);
+    assert!(wait > Duration::from_millis(0));
+}
+
+#[test]
+fn mouse_move_does_not_need_redraw() {
+    let mut app = chrome_app();
+    let redraw = app
+        .handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }))
+        .expect("mouse");
+    assert!(!redraw);
+}
+
+#[test]
+fn key_release_does_not_need_redraw() {
+    let mut app = chrome_app();
+    let redraw = app
+        .handle_event(Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        )))
+        .expect("key");
+    assert!(!redraw);
+    assert_eq!(app.tree.selected, 0);
+}
+
+#[test]
+fn resize_needs_redraw() {
+    let mut app = chrome_app();
+    let redraw = app.handle_event(Event::Resize(120, 40)).expect("resize");
+    assert!(redraw);
+}
+
+#[test]
+fn unbound_key_does_not_need_redraw() {
+    let mut app = chrome_app();
+    app.pane = Pane::Preview;
+    let redraw = app
+        .handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )))
+        .expect("key");
+    assert!(!redraw);
+}
+
+#[test]
+fn mouse_up_without_drag_does_not_need_redraw() {
+    let mut app = chrome_app();
+    let redraw = app
+        .handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }))
+        .expect("mouse");
+    assert!(!redraw);
+}
+
+#[test]
+fn motion_key_needs_redraw() {
+    let (_dir, mut app) = vault_app();
+    let redraw = app
+        .handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+        )))
+        .expect("key");
+    assert!(redraw);
+    assert!(app.tree.selected > 0);
+}
+
+#[test]
+fn quiet_reindex_finish_does_not_need_redraw() {
+    let mut app = chrome_app();
+    app.quiet_reindex = true;
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Ok(ReindexReport {
+        markdown_files: 0,
+        other_files: 0,
+        notes_indexed: 0,
+    }))
+    .unwrap();
+    app.index_rx = Some(rx);
+    assert!(!app.poll_index());
+    assert!(app.index_rx.is_none());
+}
+
+#[test]
+fn noisy_reindex_finish_needs_redraw() {
+    let mut app = chrome_app();
+    app.quiet_reindex = false;
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(Ok(ReindexReport {
+        markdown_files: 1,
+        other_files: 0,
+        notes_indexed: 1,
+    }))
+    .unwrap();
+    app.index_rx = Some(rx);
+    assert!(app.poll_index());
+    assert!(app.index_rx.is_none());
+}
+
+#[test]
+fn watch_ignores_open_keeps_writes() {
+    assert!(!is_watch_content_kind(EventKind::Access(AccessKind::Open(
+        AccessMode::Any
+    ))));
+    assert!(!is_watch_content_kind(EventKind::Access(
+        AccessKind::Close(AccessMode::Read)
+    )));
+    assert!(!is_watch_content_kind(EventKind::Access(AccessKind::Read)));
+    assert!(is_watch_content_kind(EventKind::Access(AccessKind::Close(
+        AccessMode::Write
+    ))));
+    assert!(is_watch_content_kind(EventKind::Modify(ModifyKind::Data(
+        DataChange::Any
+    ))));
+    assert!(is_watch_content_kind(EventKind::Any));
+}
+
+#[test]
+fn preview_cache_skips_rebuild_until_edit_or_resize() {
+    let (_dir, mut app) = vault_app();
+    app.load_note(std::path::PathBuf::from("notes/hello.md"));
+    let _ = buffer_text(&mut app, 100, 24);
+    let first = app.preview_builds;
+    assert!(first >= 1, "first draw should build the preview");
+    let _ = buffer_text(&mut app, 100, 24);
+    assert_eq!(app.preview_builds, first, "unchanged buffer reuses cache");
+
+    let _ = buffer_text(&mut app, 120, 24);
+    assert!(
+        app.preview_builds > first,
+        "wider pane should rebuild preview"
+    );
+    let after_resize = app.preview_builds;
+
+    send_key(&mut app, KeyCode::Char('i'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('X'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    let _ = buffer_text(&mut app, 120, 24);
+    assert!(
+        app.preview_builds > after_resize,
+        "edit should rebuild preview"
+    );
+}
+
+fn write_link_notes(app: &mut App) {
+    let root = app.vault.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("notes/world.md"), "# World\n\n## Section\nbody\n").unwrap();
+    std::fs::write(root.join("notes/hello.md"), "See [[World]] here\n").unwrap();
+    app.reload_tree();
+}
+
+#[test]
+fn gf_follows_existing_wikilink() {
+    let (_dir, mut app) = vault_app();
+    write_link_notes(&mut app);
+    app.open_file(std::path::PathBuf::from("notes/hello.md"));
+    let at = app.editor.text().find("World").expect("link");
+    app.editor.restore_view(at, 0, 0);
+    send_key(&mut app, KeyCode::Char('g'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('f'), KeyModifiers::NONE);
+    assert_eq!(app.editor.rel.as_deref(), Some("notes/world.md"));
+    assert_eq!(app.pane, Pane::Editor);
+}
+
+#[test]
+fn enter_follows_wikilink_in_normal() {
+    let (_dir, mut app) = vault_app();
+    write_link_notes(&mut app);
+    app.open_file(std::path::PathBuf::from("notes/hello.md"));
+    let at = app.editor.text().find("World").expect("link");
+    app.editor.restore_view(at, 0, 0);
+    send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.editor.rel.as_deref(), Some("notes/world.md"));
+}
+
+#[test]
+fn gf_jumps_to_heading() {
+    let (_dir, mut app) = vault_app();
+    let root = app.vault.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("notes/world.md"), "# World\n\n## Section\nbody\n").unwrap();
+    std::fs::write(root.join("notes/hello.md"), "See [[World#Section]]\n").unwrap();
+    app.reload_tree();
+    app.open_file(std::path::PathBuf::from("notes/hello.md"));
+    let at = app.editor.text().find("World").expect("link");
+    app.editor.restore_view(at, 0, 0);
+    send_key(&mut app, KeyCode::Char('g'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('f'), KeyModifiers::NONE);
+    assert_eq!(app.editor.rel.as_deref(), Some("notes/world.md"));
+    assert_eq!(app.editor.cursor_line_col().0, 2);
+}
+
+#[test]
+fn gf_missing_wikilink_confirms_create() {
+    let (_dir, mut app) = vault_app();
+    let root = app.vault.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("notes/hello.md"), "See [[Missing]]\n").unwrap();
+    app.reload_tree();
+    app.open_file(std::path::PathBuf::from("notes/hello.md"));
+    let at = app.editor.text().find("Missing").expect("link");
+    app.editor.restore_view(at, 0, 0);
+    send_key(&mut app, KeyCode::Char('g'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('f'), KeyModifiers::NONE);
+    assert!(matches!(
+        app.modal,
+        Some(Modal::Confirm {
+            kind: ConfirmKind::CreateNote { .. },
+            ..
+        })
+    ));
+    send_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+    assert_eq!(app.editor.rel.as_deref(), Some("notes/Missing.md"));
+    assert!(root.join("notes/Missing.md").is_file());
+    assert!(
+        app.editor.text().contains("# Missing"),
+        "{}",
+        app.editor.text()
+    );
+}
+
+#[test]
+fn jumplist_ctrl_o_and_i() {
+    let (_dir, mut app) = vault_app();
+    write_link_notes(&mut app);
+    app.open_file(std::path::PathBuf::from("notes/hello.md"));
+    app.editor.restore_view(4, 0, 0);
+    app.open_file(std::path::PathBuf::from("notes/world.md"));
+    assert_eq!(app.editor.rel.as_deref(), Some("notes/world.md"));
+    send_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    assert_eq!(app.editor.rel.as_deref(), Some("notes/hello.md"));
+    assert_eq!(app.editor.cursor(), 4);
+    send_key(&mut app, KeyCode::Char('i'), KeyModifiers::CONTROL);
+    assert_eq!(app.editor.rel.as_deref(), Some("notes/world.md"));
+}
+
+#[test]
+fn session_restores_note_caret_and_zen() {
+    let (_dir, mut app) = vault_app();
+    app.open_file(std::path::PathBuf::from("notes/hello.md"));
+    app.editor.restore_view(3, 0, 0);
+    app.zen = true;
+    app.save_session();
+    let vault = app.vault.clone().unwrap();
+    let paths = app.paths.clone();
+    let mut app2 = chrome_app();
+    app2.paths = paths;
+    app2.set_open_vault(vault);
+    assert_eq!(app2.editor.rel.as_deref(), Some("notes/hello.md"));
+    assert_eq!(app2.editor.cursor(), 3);
+    assert!(app2.zen);
+    assert_eq!(app2.pane, Pane::Editor);
+}
+
+#[test]
+fn reveal_expands_collapsed_ancestors() {
+    let (_dir, mut app) = vault_app();
+    app.tree.collapsed.insert(std::path::PathBuf::from("notes"));
+    app.open_file(std::path::PathBuf::from("notes/hello.md"));
+    assert!(
+        !app.tree.collapsed.contains(std::path::Path::new("notes")),
+        "notes/ should be expanded"
+    );
+    assert_eq!(
+        app.tree.selected_rel(),
+        Some(std::path::PathBuf::from("notes/hello.md"))
+    );
+}
+
+#[test]
+fn config_preview_applies_when_no_session() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let root = dir.path().join("plain");
+    let vault = init(&root).expect("init");
+    std::fs::write(vault.meta_dir.join("config.toml"), "preview = false\n").unwrap();
+    let mut app = chrome_app();
+    app.paths = Some(Paths::new(dir.path().join("cfg")));
+    app.set_open_vault(vault);
+    assert!(!app.preview_visible);
 }

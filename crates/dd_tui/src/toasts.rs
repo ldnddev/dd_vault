@@ -36,9 +36,20 @@ pub fn push_toast(toasts: &mut Vec<Toast>, level: ToastLevel, message: impl Into
     }
 }
 
-pub fn prune_toasts(toasts: &mut Vec<Toast>) {
+pub fn prune_toasts(toasts: &mut Vec<Toast>) -> bool {
+    let before = toasts.len();
     let now = Instant::now();
     toasts.retain(|t| now.duration_since(t.shown_at) < TOAST_TTL);
+    toasts.len() != before
+}
+
+/// Time until the next toast expires, if any are showing.
+pub fn next_expiry(toasts: &[Toast]) -> Option<Duration> {
+    let now = Instant::now();
+    toasts
+        .iter()
+        .map(|t| TOAST_TTL.saturating_sub(now.duration_since(t.shown_at)))
+        .min()
 }
 
 pub fn render_toasts(app: &App, frame: &mut ratatui::Frame, area: Rect, lift: u16) {

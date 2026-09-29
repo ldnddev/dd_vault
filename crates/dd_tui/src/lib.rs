@@ -9,6 +9,8 @@ mod git;
 mod help;
 mod highlight;
 mod images;
+mod jump;
+mod nav;
 mod palette;
 mod theme;
 mod toasts;

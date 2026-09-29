@@ -11,18 +11,18 @@ expression: text
 │         │  • F2                Live theme editor (source, tokens, save local/global)   │         │
 │         │  • Ctrl+Q            Quit                                                    │         │
 │         │  • Tab               Focus tree → editor → preview                           │         │
+│         │  • gf / Enter        Follow [[wikilink]] or local markdown link under the    │         │
+│         │                      caret                                                   │         │
+│         │  • Ctrl+O / Ctrl+I   Jump list back / forward                                │         │
 │         │  • <Space>p          Toggle markdown preview                                 │         │
 │         │  • <Space>ff         File finder                                             │         │
-│         │  • <Space>sg         Content search (FTS)                                    │         │
-│         │  • <Space>tg         Tag search                                              │         │
+│         │  • <Space>sg         Content search (FTS)                                    │─────────┘
+│         │  • <Space>tg         Tag search                                              │─────────┐
 │         │  • <Space>vv         Vault picker from any pane (d removes from the list)    │         │
-│         │  • <Space>nd         Open today's daily note                                 │─────────┘
-│         │  • <Space><Space>    Command palette                                         │─────────┐
+│         │  • <Space>nd         Open today's daily note                                 │         │
+│         │  • <Space><Space>    Command palette                                         │         │
 │         │  • <Space>ai         Cycle AI card (collapsed / chat / full)                 │         │
-│         │  • :ai on|off|<prompt>Enable, disable, or prompt the AI                      │         │
-│         │  • <Space>z          Focus mode (hide the tree)                              │         │
-│         │  • <Space>h          Zen (editor only; keep header/footer)                   │         │
-│         │  • <Space>e          Toggle the tree (explore)                               │ok-4.6 ─┐│
+│         │  • :ai on|off|<prompt>Enable, disable, or prompt the AI                      │ok-4.6 ─┐│
 │         └──────────────────────────────────────────────────────────────────────────────┘ai      ││
 └───────────────────────┘└───────────────────────────────────────────────────└────────────────────┘┘
 F1: Help  Esc: Close  Ctrl+Q: Quit

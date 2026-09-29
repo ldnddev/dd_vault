@@ -185,25 +185,28 @@ impl App {
         self.busy_kind = Some(if then_push { "pushing" } else { "committing" });
     }
 
-    pub fn poll_git(&mut self) {
+    pub fn poll_git(&mut self) -> bool {
         let recv = self.git_rx.as_ref().map(|r| r.try_recv());
         match recv {
             Some(Ok(Ok((op, res)))) => {
                 self.git_rx = None;
                 self.busy_kind = None;
                 self.finish_git_result(&op, res);
+                true
             }
             Some(Ok(Err(err))) => {
                 self.git_rx = None;
                 self.busy_kind = None;
                 self.refresh_git();
                 self.push_toast(ToastLevel::Error, err);
+                true
             }
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
                 self.git_rx = None;
                 self.busy_kind = None;
+                true
             }
-            _ => {}
+            _ => false,
         }
     }
 

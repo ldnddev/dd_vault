@@ -208,7 +208,7 @@ dd_vault --reindex ~/Notes</pre>
     </figure>
 
     <h3>Notes and the editor</h3>
-    <p>In the tree: <kbd>j</kbd>/<kbd>k</kbd> move, <kbd>Enter</kbd> opens, <kbd>a</kbd> new file (trailing <code>/</code> is a folder), <kbd>r</kbd> rename, <kbd>d</kbd> delete. Click a line to place the caret; drag to select. <kbd>y</kbd> and <kbd>yy</kbd> copy to the system clipboard. <kbd>i</kbd> insert, <kbd>:w</kbd> or <kbd>Ctrl+S</kbd> save. <kbd>Ctrl+V</kbd> pastes a clipboard image into <code>assets/</code>.</p>
+    <p>In the tree: <kbd>j</kbd>/<kbd>k</kbd> move, <kbd>Enter</kbd> opens, <kbd>a</kbd> new file (trailing <code>/</code> is a folder), <kbd>r</kbd> rename, <kbd>d</kbd> delete. Click a line to place the caret; drag to select. <kbd>y</kbd> and <kbd>yy</kbd> copy to the system clipboard. <kbd>i</kbd> insert, <kbd>:w</kbd> or <kbd>Ctrl+S</kbd> save. <kbd>Ctrl+V</kbd> pastes a clipboard image into <code>assets/</code>. In NORMAL, <kbd>g</kbd> <kbd>f</kbd> or <kbd>Enter</kbd> follows a <code>[[wikilink]]</code> or local markdown link (missing notes ask to create). <kbd>Ctrl+O</kbd> / <kbd>Ctrl+I</kbd> walk the jump list. Reopening a vault restores the last note, caret, wrap, preview, splits, and zen/focus.</p>
     <figure>
       <img src="screenshots/08-editor.jpg" width="1280" height="720" alt="Editor in INSERT mode with a blinking caret">
       <figcaption>INSERT mode. Dirty notes show ± in the editor title.</figcaption>
@@ -260,6 +260,8 @@ dd_vault --reindex ~/Notes</pre>
         <tr><td><kbd>F1</kbd> / <kbd>F2</kbd></td><td>Help / theme</td></tr>
         <tr><td><kbd>Ctrl+Q</kbd> / <kbd>Ctrl+S</kbd></td><td>Quit / save</td></tr>
         <tr><td><kbd>Tab</kbd></td><td>Tree → editor → preview</td></tr>
+        <tr><td><kbd>g</kbd> <kbd>f</kbd> / <kbd>Enter</kbd></td><td>Follow wikilink / markdown link</td></tr>
+        <tr><td><kbd>Ctrl+O</kbd> / <kbd>Ctrl+I</kbd></td><td>Jump list back / forward</td></tr>
         <tr><td><kbd>Space</kbd> <kbd>Space</kbd></td><td>Command palette</td></tr>
         <tr><td><kbd>Space</kbd> <kbd>v</kbd> <kbd>v</kbd></td><td>Vault picker</td></tr>
         <tr><td><kbd>Space</kbd> <kbd>p</kbd></td><td>Toggle preview</td></tr>

@@ -86,3 +86,67 @@ pub fn rel_from_root(root: &Path, abs: &Path) -> PathBuf {
         .map(Path::to_path_buf)
         .unwrap_or_else(|_| abs.to_path_buf())
 }
+
+/// Path to create for a missing `[[target]]`, relative to the vault root.
+pub fn wikilink_new_rel(current: Option<&Path>, dst: &str) -> Result<PathBuf, Error> {
+    let dst = dst.trim().trim_start_matches('/');
+    let stem = dst.strip_suffix(".md").unwrap_or(dst).trim();
+    if stem.is_empty() {
+        return Err(Error::InvalidEntryName(dst.to_string()));
+    }
+    let file = if dst.ends_with(".md") {
+        PathBuf::from(dst)
+    } else {
+        PathBuf::from(format!("{stem}.md"))
+    };
+    if file.is_absolute()
+        || file.components().any(|c| {
+            matches!(
+                c,
+                Component::Prefix(_) | Component::RootDir | Component::ParentDir
+            )
+        })
+    {
+        return Err(Error::InvalidEntryName(dst.to_string()));
+    }
+    if file.components().count() > 1 {
+        if file.starts_with("notes") || file.starts_with("assets") {
+            Ok(file)
+        } else {
+            Ok(PathBuf::from("notes").join(file))
+        }
+    } else {
+        let parent = current
+            .and_then(|p| p.parent())
+            .unwrap_or_else(|| Path::new("notes"));
+        Ok(parent.join(file))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wikilink_new_rel_sibling_nested_and_rejects() {
+        let cur = Path::new("notes/hello.md");
+        assert_eq!(
+            wikilink_new_rel(Some(cur), "World").unwrap(),
+            PathBuf::from("notes/World.md")
+        );
+        assert_eq!(
+            wikilink_new_rel(Some(cur), "projects/Thing").unwrap(),
+            PathBuf::from("notes/projects/Thing.md")
+        );
+        assert_eq!(
+            wikilink_new_rel(None, "Inbox").unwrap(),
+            PathBuf::from("notes/Inbox.md")
+        );
+        assert_eq!(
+            wikilink_new_rel(Some(cur), "assets/pic.md").unwrap(),
+            PathBuf::from("assets/pic.md")
+        );
+        assert!(wikilink_new_rel(Some(cur), "../escape").is_err());
+        assert!(wikilink_new_rel(Some(cur), "").is_err());
+    }
+}

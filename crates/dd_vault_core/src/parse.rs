@@ -166,40 +166,124 @@ fn parse_hash_tags(body: &str) -> Vec<String> {
     tags
 }
 
-fn parse_wikilinks(body: &str) -> Vec<ParsedLink> {
-    let mut links = Vec::new();
-    let mut rest = body;
-    while let Some(start) = rest.find("[[") {
-        let embed = start >= 1 && rest.as_bytes()[start - 1] == b'!';
-        rest = &rest[start + 2..];
-        let Some(end) = rest.find("]]") else {
-            break;
-        };
-        let inner = &rest[..end];
-        rest = &rest[end + 2..];
-        let (target, alias) = match inner.split_once('|') {
-            Some((t, a)) => (t.trim(), Some(a.trim())),
-            None => (inner.trim(), None),
-        };
-        let (dst, heading) = match target.split_once('#') {
-            Some((d, h)) => (d.trim().to_string(), Some(h.trim().to_string())),
-            None => (target.to_string(), None),
-        };
-        if dst.is_empty() {
-            continue;
+/// A wikilink or local markdown link with char offsets into `src`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocatedLink {
+    pub start: usize,
+    pub end: usize,
+    pub link: ParsedLink,
+}
+
+/// Link covering `cursor` (char index), if any.
+pub fn link_at(src: &str, cursor: usize) -> Option<ParsedLink> {
+    located_links(src)
+        .into_iter()
+        .find(|l| cursor >= l.start && cursor < l.end)
+        .map(|l| l.link)
+}
+
+pub fn located_links(src: &str) -> Vec<LocatedLink> {
+    let chars: Vec<char> = src.chars().collect();
+    let n = chars.len();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        if i + 1 < n && chars[i] == '[' && chars[i + 1] == '[' {
+            let embed = i > 0 && chars[i - 1] == '!';
+            if let Some(rel) = chars[i + 2..]
+                .windows(2)
+                .position(|w| w[0] == ']' && w[1] == ']')
+            {
+                let inner_end = i + 2 + rel;
+                let inner: String = chars[i + 2..inner_end].iter().collect();
+                let start = if embed { i - 1 } else { i };
+                let end = inner_end + 2;
+                if let Some(link) = parse_wiki_target(&inner, embed) {
+                    out.push(LocatedLink { start, end, link });
+                }
+                i = end;
+                continue;
+            }
         }
-        let _ = alias;
-        links.push(ParsedLink {
+        i += 1;
+    }
+    i = 0;
+    while i < n {
+        if chars[i] == '[' && !(i + 1 < n && chars[i + 1] == '[') {
+            if let Some(br) = chars[i + 1..].iter().position(|&c| c == ']') {
+                let close = i + 1 + br;
+                if close + 1 < n && chars[close + 1] == '(' {
+                    if let Some(pr) = chars[close + 2..].iter().position(|&c| c == ')') {
+                        let url_e = close + 2 + pr;
+                        let url: String = chars[close + 2..url_e].iter().collect();
+                        let url = url.trim();
+                        if let Some(link) = parse_md_target(url) {
+                            out.push(LocatedLink {
+                                start: i,
+                                end: url_e + 1,
+                                link,
+                            });
+                        }
+                        i = url_e + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    out.sort_by_key(|l| l.start);
+    out
+}
+
+fn parse_wiki_target(inner: &str, embed: bool) -> Option<ParsedLink> {
+    let (target, _alias) = match inner.split_once('|') {
+        Some((t, a)) => (t.trim(), Some(a.trim())),
+        None => (inner.trim(), None),
+    };
+    let (dst, heading) = match target.split_once('#') {
+        Some((d, h)) => (d.trim().to_string(), Some(h.trim().to_string())),
+        None => (target.to_string(), None),
+    };
+    if dst.is_empty() {
+        return None;
+    }
+    Some(ParsedLink {
+        dst_raw: dst,
+        dst_heading: heading,
+        kind: if embed {
+            LinkKind::Embed
+        } else {
+            LinkKind::Wiki
+        },
+    })
+}
+
+fn parse_md_target(url: &str) -> Option<ParsedLink> {
+    if url.starts_with("http://") || url.starts_with("https://") || url.starts_with('#') {
+        return None;
+    }
+    let (dst, heading) = match url.split_once('#') {
+        Some((d, h)) => (d.trim().to_string(), Some(h.trim().to_string())),
+        None => (url.to_string(), None),
+    };
+    if dst.ends_with(".md") || dst.contains('/') || !dst.contains(':') {
+        Some(ParsedLink {
             dst_raw: dst,
             dst_heading: heading,
-            kind: if embed {
-                LinkKind::Embed
-            } else {
-                LinkKind::Wiki
-            },
-        });
+            kind: LinkKind::Md,
+        })
+    } else {
+        None
     }
-    links
+}
+
+fn parse_wikilinks(body: &str) -> Vec<ParsedLink> {
+    located_links(body)
+        .into_iter()
+        .filter(|l| matches!(l.link.kind, LinkKind::Wiki | LinkKind::Embed))
+        .map(|l| l.link)
+        .collect()
 }
 
 fn parse_md_links(body: &str) -> Vec<ParsedLink> {
@@ -266,5 +350,16 @@ mod tests {
             .links
             .iter()
             .any(|l| l.kind == LinkKind::Md && l.dst_raw == "foo.md"));
+    }
+
+    #[test]
+    fn link_at_finds_wiki_and_markdown() {
+        let src = "See [[Inbox#Tasks|box]] and [x](foo.md).";
+        let wiki = link_at(src, src.find("Inbox").expect("inbox")).expect("wiki");
+        assert_eq!(wiki.dst_raw, "Inbox");
+        assert_eq!(wiki.dst_heading.as_deref(), Some("Tasks"));
+        let md = link_at(src, src.find("foo.md").expect("md")).expect("md");
+        assert_eq!(md.dst_raw, "foo.md");
+        assert!(link_at(src, 0).is_none());
     }
 }

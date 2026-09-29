@@ -279,6 +279,31 @@ impl Index {
         Ok(id)
     }
 
+    /// Resolve a `[[target]]` (or markdown path) to a vault-relative file path.
+    pub fn resolve_wikilink(&self, raw: &str) -> Result<Option<String>, Error> {
+        let dst = raw
+            .split('#')
+            .next()
+            .unwrap_or(raw)
+            .split('|')
+            .next()
+            .unwrap_or(raw)
+            .trim();
+        if dst.is_empty() {
+            return Ok(None);
+        }
+        let Some(id) = self.lookup_note(dst)? else {
+            return Ok(None);
+        };
+        let path = self
+            .conn
+            .query_row("SELECT path FROM files WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(path)
+    }
+
     pub fn search_files(&self, query: &str) -> Result<Vec<FileHit>, Error> {
         let mut stmt = self.conn.prepare(
             "SELECT f.path,
@@ -554,5 +579,25 @@ mod tests {
             by_title.iter().any(|h| h.title.contains("Greeting")),
             "{by_title:?}"
         );
+    }
+
+    #[test]
+    fn resolve_wikilink_by_stem_and_title() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path().join("vault");
+        let vault = init(&root).expect("init");
+        fs::write(
+            root.join("notes/hello.md"),
+            "---\ntitle: Greeting\naliases: [howdy]\n---\n# Greeting\n",
+        )
+        .expect("write");
+        Index::rebuild(&vault).expect("rebuild");
+        let idx = Index::open(&vault.meta_dir).expect("open");
+        let by_stem = idx.resolve_wikilink("hello").expect("stem");
+        assert_eq!(by_stem.as_deref(), Some("notes/hello.md"));
+        let by_alias = idx.resolve_wikilink("howdy").expect("alias");
+        assert_eq!(by_alias.as_deref(), Some("notes/hello.md"));
+        let missing = idx.resolve_wikilink("nope").expect("miss");
+        assert!(missing.is_none());
     }
 }

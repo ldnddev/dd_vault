@@ -286,6 +286,19 @@ fn reload_from_disk_picks_up_external_edit() {
 }
 
 #[test]
+fn gf_and_enter_request_follow_link() {
+    let mut e = ed("See [[Inbox]] now");
+    let at = "See [[In".chars().count();
+    e.restore_view(at, 0, 0);
+    assert_eq!(e.handle(Key::Char('g')), Action::None);
+    assert_eq!(
+        e.handle(Key::Char('f')),
+        Action::FollowLink { from_gf: true }
+    );
+    assert_eq!(e.handle(Key::Enter), Action::FollowLink { from_gf: false });
+}
+
+#[test]
 fn marks_jump() {
     let mut e = ed("aa\nbb\ncc");
     e.handle(Key::Char('j'));

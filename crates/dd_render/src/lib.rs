@@ -17,7 +17,7 @@ pub enum Error {
     Image(#[from] image::ImageError),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreviewPalette {
     pub text: Color,
     pub muted: Color,

@@ -1,10 +1,10 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Modal, Pane, PromptKind};
+use crate::app::{App, Modal, Pane, PreviewCache, PromptKind};
 use crate::help::{build_help_text, build_theme_text, count_wrapped_lines};
 use crate::toasts::render_toasts;
 use crate::tree::VisibleRow;
@@ -675,8 +675,80 @@ fn render_finder(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(lines), chunks[1]);
 }
 
+fn cached_preview_text(
+    app: &mut App,
+    pal: dd_render::PreviewPalette,
+    max_w: u16,
+    max_rows: u16,
+) -> Text<'static> {
+    let src = app.editor.text();
+    let rel = app.editor.rel.clone();
+    let epoch = app.preview_epoch;
+    if let Some(c) = &app.preview_cache {
+        if c.rel == rel
+            && c.src == src
+            && c.max_w == max_w
+            && c.max_rows == max_rows
+            && c.pal == pal
+            && c.epoch == epoch
+        {
+            return c.text.clone();
+        }
+    }
+
+    let vault_root = app.vault.as_ref().map(|v| v.root.clone());
+    let note_rel = rel.as_ref().map(std::path::PathBuf::from);
+    let tree = &app.tree;
+    let resolve = |target: &str| -> Option<String> {
+        let name = target.split('#').next()?.split('|').next()?.trim();
+        if dd_render::looks_like_image(name) {
+            return None;
+        }
+        let found = tree.find_file(name)?;
+        let root = vault_root.as_ref()?;
+        let path = root.join(found);
+        let raw = std::fs::read_to_string(path).ok()?;
+        let mut lines: Vec<&str> = raw.lines().take(80).collect();
+        if raw.lines().count() > 80 {
+            lines.push("…");
+        }
+        Some(lines.join("\n"))
+    };
+    let resolve_image = |url: &str| -> Option<Vec<u8>> {
+        let root = vault_root.as_ref()?;
+        if let Some(path) = crate::images::resolve_image_path(root, note_rel.as_deref(), url) {
+            return std::fs::read(path).ok();
+        }
+        let base = std::path::Path::new(url).file_name()?.to_string_lossy();
+        let found = tree.find_file(base.as_ref())?;
+        std::fs::read(root.join(found)).ok()
+    };
+    let text = dd_render::render_markdown_ex(
+        &src,
+        pal,
+        Some(&resolve),
+        Some(&resolve_image),
+        max_w,
+        max_rows,
+    );
+    #[cfg(test)]
+    {
+        app.preview_builds = app.preview_builds.saturating_add(1);
+    }
+    app.preview_cache = Some(PreviewCache {
+        rel,
+        src,
+        max_w,
+        max_rows,
+        pal,
+        epoch,
+        text: text.clone(),
+    });
+    text
+}
+
 fn render_preview(frame: &mut Frame, app: &mut App, border: ratatui::style::Color) {
-    use dd_render::{render_markdown_ex, PreviewPalette};
+    use dd_render::PreviewPalette;
 
     let block = Block::default()
         .title(" preview ")
@@ -719,44 +791,9 @@ fn render_preview(frame: &mut Frame, app: &mut App, border: ratatui::style::Colo
         info: app.theme.info,
         background: app.theme.body_background,
     };
-    let src = app.editor.text();
-    let vault_root = app.vault.as_ref().map(|v| v.root.clone());
-    let note_rel = app.editor.rel.as_ref().map(std::path::PathBuf::from);
-    let tree = &app.tree;
-    let resolve = |target: &str| -> Option<String> {
-        let name = target.split('#').next()?.split('|').next()?.trim();
-        if dd_render::looks_like_image(name) {
-            return None;
-        }
-        let rel = tree.find_file(name)?;
-        let root = vault_root.as_ref()?;
-        let path = root.join(rel);
-        let raw = std::fs::read_to_string(path).ok()?;
-        let mut lines: Vec<&str> = raw.lines().take(80).collect();
-        if raw.lines().count() > 80 {
-            lines.push("…");
-        }
-        Some(lines.join("\n"))
-    };
-    let resolve_image = |url: &str| -> Option<Vec<u8>> {
-        let root = vault_root.as_ref()?;
-        if let Some(path) = crate::images::resolve_image_path(root, note_rel.as_deref(), url) {
-            return std::fs::read(path).ok();
-        }
-        let base = std::path::Path::new(url).file_name()?.to_string_lossy();
-        let rel = tree.find_file(base.as_ref())?;
-        std::fs::read(root.join(rel)).ok()
-    };
     let max_w = inner.width.saturating_sub(1).max(1);
     let max_rows = inner.height.clamp(1, 16);
-    let text = render_markdown_ex(
-        &src,
-        pal,
-        Some(&resolve),
-        Some(&resolve_image),
-        max_w,
-        max_rows,
-    );
+    let text = cached_preview_text(app, pal, max_w, max_rows);
     let total = text.lines.len();
     let vis = inner.height as usize;
     let max_scroll = total.saturating_sub(vis);

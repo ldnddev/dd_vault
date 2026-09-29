@@ -80,6 +80,10 @@ pub enum Action {
     Info(String),
     /// Yanked text (`y`, `yy`, visual `y`) for the OS clipboard.
     CopyClipboard(String),
+    /// Follow `[[wikilink]]` or local markdown link under the caret.
+    FollowLink {
+        from_gf: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +181,32 @@ impl Editor {
             }
         }
         s
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn len_chars(&self) -> usize {
+        self.rope.len_chars()
+    }
+
+    pub fn visual_linewise(&self) -> bool {
+        self.visual_line
+    }
+
+    pub fn restore_view(&mut self, cursor: usize, scroll: usize, scroll_off: usize) {
+        let len = self.rope.len_chars();
+        self.cursor = cursor.min(len);
+        self.scroll = scroll.min(self.line_count().saturating_sub(1));
+        self.scroll_off = scroll_off;
+        self.sync_col();
+    }
+
+    pub fn go_line(&mut self, n: usize) {
+        let dest = n.saturating_sub(1).min(self.line_count().saturating_sub(1));
+        self.cursor = self.line_start(dest);
+        self.sync_col();
     }
 
     pub fn cursor_line_col(&self) -> (usize, usize) {
@@ -570,6 +600,11 @@ impl Editor {
                 self.go_line(1);
                 return Action::None;
             }
+            (Pending::G, Key::Char('f')) => {
+                self.pending = Pending::None;
+                self.take_count();
+                return Action::FollowLink { from_gf: true };
+            }
             (Pending::D, Key::Char('d')) => {
                 self.pending = Pending::None;
                 let n = self.take_count();
@@ -725,6 +760,7 @@ impl Editor {
                 self.find_next(false);
                 Action::None
             }
+            Key::Enter => Action::FollowLink { from_gf: false },
             other => {
                 let times = self.take_count();
                 for _ in 0..times {
@@ -1021,12 +1057,6 @@ impl Editor {
         }
         self.snapshot();
         self.insert_str(s);
-    }
-
-    fn go_line(&mut self, n: usize) {
-        let dest = n.saturating_sub(1).min(self.line_count().saturating_sub(1));
-        self.cursor = self.line_start(dest);
-        self.sync_col();
     }
 
     fn is_word(c: char) -> bool {

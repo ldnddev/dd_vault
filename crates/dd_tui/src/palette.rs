@@ -56,6 +56,21 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
         keys: ":daily  <Space>nd",
     },
     PaletteItem {
+        id: "jump-back",
+        label: "Jump back",
+        keys: "Ctrl+O",
+    },
+    PaletteItem {
+        id: "jump-forward",
+        label: "Jump forward",
+        keys: "Ctrl+I",
+    },
+    PaletteItem {
+        id: "follow",
+        label: "Follow link under caret",
+        keys: "gf  Enter",
+    },
+    PaletteItem {
         id: "ai",
         label: "Toggle AI card",
         keys: "<Space>ai  :ai",
@@ -197,6 +212,9 @@ impl App {
             "tags" => self.open_finder(crate::app::FinderKind::Tags),
             "vault" => self.open_picker(),
             "daily" => self.open_daily(),
+            "jump-back" => self.jump_back(),
+            "jump-forward" => self.jump_forward(),
+            "follow" => self.follow_link(true),
             "ai" => self.cycle_ai_card(),
             "ai-on" => self.ai_enable(),
             "ai-off" => self.ai_disable(),

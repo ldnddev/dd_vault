@@ -297,31 +297,44 @@ impl App {
         }
     }
 
-    pub fn poll_ai(&mut self) {
-        let recv = self.ai.rx.as_ref().map(|r| r.try_recv());
-        match recv {
-            Some(Ok(Ok(Delta::Text(t)))) => {
-                self.ai.stream.push_str(&t);
-            }
-            Some(Ok(Ok(Delta::Done))) => self.finish_ai_ok(),
-            Some(Ok(Err(err))) => {
-                self.ai.rx = None;
-                self.ai.cancel = None;
-                self.ai.pending = None;
-                self.ai.stream.clear();
-                self.push_toast(ToastLevel::Error, err.to_string());
-            }
-            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                if !self.ai.stream.is_empty() {
+    pub fn poll_ai(&mut self) -> bool {
+        let mut changed = false;
+        loop {
+            let recv = self.ai.rx.as_ref().map(|r| r.try_recv());
+            match recv {
+                Some(Ok(Ok(Delta::Text(t)))) => {
+                    self.ai.stream.push_str(&t);
+                    changed = true;
+                }
+                Some(Ok(Ok(Delta::Done))) => {
                     self.finish_ai_ok();
-                } else {
+                    changed = true;
+                    break;
+                }
+                Some(Ok(Err(err))) => {
                     self.ai.rx = None;
                     self.ai.cancel = None;
                     self.ai.pending = None;
+                    self.ai.stream.clear();
+                    self.push_toast(ToastLevel::Error, err.to_string());
+                    changed = true;
+                    break;
                 }
+                Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                    if !self.ai.stream.is_empty() {
+                        self.finish_ai_ok();
+                    } else {
+                        self.ai.rx = None;
+                        self.ai.cancel = None;
+                        self.ai.pending = None;
+                    }
+                    changed = true;
+                    break;
+                }
+                Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => break,
             }
-            _ => {}
         }
+        changed
     }
 
     fn finish_ai_ok(&mut self) {

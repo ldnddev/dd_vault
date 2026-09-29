@@ -10,19 +10,39 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use dd_edit::{Action, Editor};
+use dd_render::PreviewPalette;
 use dd_vault_core::{
     open, FileHit, GitOpResult, GitStatus, Index, Paths, Registry, ReindexReport, Vault,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
+use ratatui::text::Text;
 use ratatui::Terminal;
 
 use crate::ai::AiState;
+use crate::jump::{Jump, JumpList};
 use crate::theme::{choose_header_copy, AppTheme, ThemeLoad};
 use crate::toasts::{Toast, ToastLevel};
 use crate::tree::TreeState;
 
 pub const DOUBLE_CLICK_MS: u128 = 420;
+/// Busy loader frame while git/AI is running.
+pub const BUSY_POLL: Duration = Duration::from_millis(80);
+/// Wake to drain watch/index channels without drawing.
+pub const CHANNEL_POLL: Duration = Duration::from_millis(100);
+/// Long wait when nothing is pending.
+pub const REST_POLL: Duration = Duration::from_millis(1000);
+
+/// Cached markdown preview. Rebuilt when the buffer, size, theme, or vault tree changes.
+pub(crate) struct PreviewCache {
+    pub rel: Option<String>,
+    pub src: String,
+    pub max_w: u16,
+    pub max_rows: u16,
+    pub pal: PreviewPalette,
+    pub epoch: u64,
+    pub text: Text<'static>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
@@ -98,17 +118,74 @@ pub enum PromptKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfirmKind {
-    Delete { rel: PathBuf },
-    Discard { next: DiscardNext },
-    ReloadDisk { rel: PathBuf },
+    Delete {
+        rel: PathBuf,
+    },
+    Discard {
+        next: DiscardNext,
+    },
+    ReloadDisk {
+        rel: PathBuf,
+    },
     AiSend,
-    ForgetVault { name: String, path: String },
+    ForgetVault {
+        name: String,
+        path: String,
+    },
+    CreateNote {
+        rel: PathBuf,
+        heading: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiscardNext {
     Quit,
-    Open(PathBuf),
+    Navigate(NavigateTo),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JumpAction {
+    /// Push the current location onto the back stack (finder, gf, open).
+    Record,
+    /// Pop the back stack after a successful jump.
+    Back,
+    /// Pop the forward stack after a successful jump.
+    Forward,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavigateTo {
+    pub rel: PathBuf,
+    pub heading: Option<String>,
+    pub cursor: Option<usize>,
+    pub scroll: Option<usize>,
+    pub scroll_off: Option<usize>,
+    pub jump: JumpAction,
+}
+
+impl NavigateTo {
+    pub fn file(rel: PathBuf) -> Self {
+        Self {
+            rel,
+            heading: None,
+            cursor: None,
+            scroll: None,
+            scroll_off: None,
+            jump: JumpAction::Record,
+        }
+    }
+
+    pub fn from_jump(loc: Jump, action: JumpAction) -> Self {
+        Self {
+            rel: loc.rel,
+            heading: None,
+            cursor: Some(loc.cursor),
+            scroll: Some(loc.scroll),
+            scroll_off: Some(loc.scroll_off),
+            jump: action,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,6 +251,11 @@ pub struct App {
     pub preview_split: u16,
     pub split_drag: Option<SplitDrag>,
     pub body_width: u16,
+    pub jumps: JumpList,
+    pub(crate) preview_cache: Option<PreviewCache>,
+    pub(crate) preview_epoch: u64,
+    #[cfg(test)]
+    pub preview_builds: u32,
 }
 
 impl App {
@@ -236,6 +318,11 @@ impl App {
             preview_split: 0,
             split_drag: None,
             body_width: 120,
+            jumps: JumpList::default(),
+            preview_cache: None,
+            preview_epoch: 0,
+            #[cfg(test)]
+            preview_builds: 0,
         }
     }
 
@@ -280,12 +367,23 @@ impl App {
     }
 
     pub fn set_open_vault(&mut self, vault: Vault) {
-        self.wrap_notes = dd_vault_core::VaultConfig::load(&vault.meta_dir).wrap;
+        if self.vault.is_some() {
+            self.save_session();
+        }
+        self.jumps.clear();
+        let cfg = dd_vault_core::VaultConfig::load(&vault.meta_dir);
+        self.wrap_notes = cfg.wrap;
+        self.preview_visible = cfg.preview;
+        self.zen = false;
+        self.focus = false;
+        self.explore = false;
+        self.tree_split = 0;
+        self.preview_split = 0;
+        self.preview_scroll = 0;
         self.registry.register(&vault);
         self.persist_registry();
         self.tree = TreeState::load(&vault);
         self.editor = Editor::empty();
-        self.preview_scroll = 0;
         match Index::open(&vault.meta_dir) {
             Ok(idx) => self.index = Some(idx),
             Err(err) => {
@@ -297,6 +395,8 @@ impl App {
         self.quiet_reindex = false;
         self.suppress_disk_prompt = None;
         self.pending_disk_prompt = None;
+        self.preview_cache = None;
+        self.preview_epoch = self.preview_epoch.wrapping_add(1);
         self.vault = Some(vault);
         self.refresh_git();
         self.spawn_reindex();
@@ -305,6 +405,7 @@ impl App {
         }
         self.modal = None;
         self.leader = Leader::None;
+        self.restore_session();
         if let Some(v) = &self.vault {
             self.push_toast(ToastLevel::Success, format!("Opened vault: {}", v.name));
         }
@@ -385,6 +486,8 @@ impl App {
     }
 
     pub fn close_vault(&mut self) {
+        self.save_session();
+        self.jumps.clear();
         self.watch = None;
         self.index_rx = None;
         self.index = None;
@@ -395,6 +498,8 @@ impl App {
         self.git_rx = None;
         self.busy_kind = None;
         self.preview_scroll = 0;
+        self.preview_cache = None;
+        self.preview_epoch = self.preview_epoch.wrapping_add(1);
     }
 
     pub fn activate_picker_selection(&mut self) {
@@ -475,6 +580,7 @@ impl App {
     }
 
     pub fn request_quit(&mut self, force: bool) {
+        self.save_session();
         if force || !self.editor.dirty {
             self.should_quit = true;
             return;
@@ -488,16 +594,7 @@ impl App {
     }
 
     pub fn open_file(&mut self, rel: PathBuf) {
-        if self.editor.dirty {
-            self.modal = Some(Modal::Confirm {
-                kind: ConfirmKind::Discard {
-                    next: DiscardNext::Open(rel.clone()),
-                },
-                message: format!("Discard unsaved changes and open {}?", rel.display()),
-            });
-            return;
-        }
-        self.load_note(rel);
+        self.navigate(NavigateTo::file(rel));
     }
 
     pub fn apply_editor_action(&mut self, action: Action) {
@@ -509,6 +606,7 @@ impl App {
             Action::SaveQuit => {
                 self.save_note();
                 if !self.editor.dirty {
+                    self.save_session();
                     self.should_quit = true;
                 }
             }
@@ -530,14 +628,16 @@ impl App {
             Action::AiOff => self.ai_disable(),
             Action::AiPrompt(p) => self.request_ai(p, None),
             Action::CopyClipboard(text) => self.copy_text_to_clipboard(&text),
+            Action::FollowLink { from_gf } => self.follow_link(from_gf),
         }
     }
 
-    pub fn poll_index(&mut self) {
+    pub fn poll_index(&mut self) -> bool {
         let recv = self.index_rx.as_ref().map(mpsc::Receiver::try_recv);
         match recv {
             Some(Ok(Ok(report))) => {
-                if !self.quiet_reindex {
+                let noisy = !self.quiet_reindex;
+                if noisy {
                     self.push_toast(
                         ToastLevel::Success,
                         format!("Indexed {} notes", report.notes_indexed),
@@ -547,21 +647,49 @@ impl App {
                     self.index = Index::open(&v.meta_dir).ok();
                 }
                 self.index_rx = None;
+                if matches!(self.modal, Some(Modal::Finder { .. })) {
+                    self.refresh_finder();
+                }
                 if self.reindex_queued {
                     self.reindex_queued = false;
                     self.quiet_reindex = true;
                     self.spawn_reindex();
                 }
+                noisy || matches!(self.modal, Some(Modal::Finder { .. }))
             }
             Some(Ok(Err(err))) => {
-                if !self.quiet_reindex {
+                let noisy = !self.quiet_reindex;
+                if noisy {
                     self.push_toast(ToastLevel::Error, format!("Reindex failed: {err}"));
                 }
                 self.index_rx = None;
+                noisy
             }
-            Some(Err(TryRecvError::Disconnected)) => self.index_rx = None,
-            _ => {}
+            Some(Err(TryRecvError::Disconnected)) => {
+                self.index_rx = None;
+                false
+            }
+            _ => false,
         }
+    }
+
+    /// How long to wait for the next crossterm event before polling channels again.
+    pub fn poll_timeout(&self) -> Duration {
+        let mut wait = REST_POLL;
+        if self.is_busy() {
+            wait = BUSY_POLL;
+        }
+        if self.index_rx.is_some() || self.watch.is_some() {
+            wait = wait.min(CHANNEL_POLL);
+        }
+        if let Some(deadline) = self.watch.as_ref().and_then(|w| w.next_deadline()) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            wait = wait.min(remaining.max(Duration::from_millis(1)));
+        }
+        if let Some(until) = crate::toasts::next_expiry(&self.toasts) {
+            wait = wait.min(until.max(Duration::from_millis(1)));
+        }
+        wait
     }
 
     pub fn open_finder(&mut self, kind: FinderKind) {
@@ -636,7 +764,14 @@ impl App {
             };
             self.editor.insert_text(&insert);
         } else {
-            self.open_file(PathBuf::from(hit.path));
+            self.navigate(NavigateTo {
+                rel: PathBuf::from(hit.path),
+                heading: hit.heading,
+                cursor: None,
+                scroll: None,
+                scroll_off: None,
+                jump: JumpAction::Record,
+            });
         }
     }
 
@@ -646,6 +781,7 @@ impl App {
             self.pane = Pane::Editor;
         }
         self.leader = Leader::None;
+        self.save_session();
     }
 
     pub fn cycle_pane(&mut self) {
@@ -703,6 +839,7 @@ impl App {
         if self.focus && self.pane == Pane::Tree {
             self.pane = Pane::Editor;
         }
+        self.save_session();
     }
 
     pub fn toggle_zen(&mut self) {
@@ -712,6 +849,7 @@ impl App {
             self.collapse_ai();
             self.pane = Pane::Editor;
         }
+        self.save_session();
     }
 
     pub fn toggle_explore(&mut self) {
@@ -726,6 +864,7 @@ impl App {
         } else if self.pane == Pane::Tree {
             self.pane = Pane::Editor;
         }
+        self.save_session();
     }
 
     pub fn vault_header_label(&self) -> String {
@@ -819,27 +958,41 @@ fn run_loop<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut 
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
+    let mut needs_draw = true;
     while !app.should_quit {
-        app.poll_index();
-        app.poll_watch();
-        app.poll_ai();
-        app.poll_git();
-        crate::toasts::prune_toasts(&mut app.toasts);
-        terminal.draw(|frame| crate::draw::draw(frame, app))?;
-        let wait = if app.is_busy() {
-            Duration::from_millis(80)
-        } else {
-            Duration::from_millis(100)
-        };
-        if event::poll(wait)? {
-            app.handle_event(event::read()?)?;
+        if app.poll_index() {
+            needs_draw = true;
+        }
+        if app.poll_watch() {
+            needs_draw = true;
+        }
+        if app.poll_ai() {
+            needs_draw = true;
+        }
+        if app.poll_git() {
+            needs_draw = true;
+        }
+        if crate::toasts::prune_toasts(&mut app.toasts) {
+            needs_draw = true;
+        }
+        if needs_draw {
+            terminal.draw(|frame| crate::draw::draw(frame, app))?;
+            needs_draw = false;
+        }
+        let busy = app.is_busy();
+        if event::poll(app.poll_timeout())? {
+            if app.handle_event(event::read()?)? {
+                needs_draw = true;
+            }
+        } else if busy {
+            needs_draw = true;
         }
     }
     Ok(())
 }
 
 impl App {
-    pub fn handle_event(&mut self, evt: Event) -> Result<()> {
+    pub fn handle_event(&mut self, evt: Event) -> Result<bool> {
         crate::events::handle_event(self, evt)
     }
 }

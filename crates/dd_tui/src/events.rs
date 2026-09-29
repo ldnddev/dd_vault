@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
 use dd_edit::{Key as EditKey, Mode};
@@ -14,7 +14,140 @@ use crate::app::{
 use crate::theme::{apply_palette, extra_theme_fields, palette_from_theme, THEME_FILENAME};
 use crate::toasts::ToastLevel;
 
-pub fn handle_event(app: &mut App, evt: Event) -> Result<()> {
+pub fn handle_event(app: &mut App, evt: Event) -> Result<bool> {
+    match &evt {
+        Event::FocusGained | Event::FocusLost => return Ok(false),
+        Event::Key(k) if k.kind == KeyEventKind::Release => return Ok(false),
+        Event::Mouse(m) if matches!(m.kind, MouseEventKind::Moved) => return Ok(false),
+        Event::Resize(_, _) => return Ok(true),
+        _ => {}
+    }
+    // Live theme edits can change colors without moving selection.
+    let force_theme = app.show_theme && matches!(evt, Event::Key(_));
+    let before = ViewTick::capture(app);
+    dispatch_event(app, evt)?;
+    if force_theme {
+        return Ok(true);
+    }
+    Ok(ViewTick::capture(app) != before)
+}
+
+/// Visible TUI state. Equal ticks mean the event did not need a redraw.
+#[derive(Clone, PartialEq, Eq)]
+struct ViewTick {
+    pane: Pane,
+    show_help: bool,
+    help_scroll: u16,
+    show_theme: bool,
+    theme_sel: usize,
+    has_modal: bool,
+    modal_sel: usize,
+    modal_q: usize,
+    modal_n: usize,
+    prompt_kind: u8,
+    editor_mode: Mode,
+    editor_cursor: usize,
+    editor_dirty: bool,
+    editor_scroll: usize,
+    editor_off: usize,
+    editor_cmd: usize,
+    editor_rel: Option<String>,
+    editor_lines: usize,
+    editor_chars: usize,
+    editor_visual_line: bool,
+    tree_sel: usize,
+    tree_scroll: usize,
+    tree_filter: usize,
+    tree_filtering: bool,
+    tree_collapsed: usize,
+    preview_scroll: u16,
+    preview_visible: bool,
+    wrap_notes: bool,
+    zen: bool,
+    focus: bool,
+    explore: bool,
+    tree_split: u16,
+    preview_split: u16,
+    toasts: usize,
+    git_state: dd_vault_core::GitState,
+    ai_size: crate::ai::AiSize,
+    ai_draft: usize,
+    ai_stream: usize,
+    ai_scroll: u16,
+    ai_transcript: usize,
+    busy: bool,
+    should_quit: bool,
+}
+
+impl ViewTick {
+    fn capture(app: &App) -> Self {
+        let (modal_sel, modal_q, modal_n, prompt_kind) = match &app.modal {
+            Some(Modal::Finder {
+                selected,
+                query,
+                hits,
+                ..
+            }) => (*selected, query.len(), hits.len(), 1),
+            Some(Modal::Palette {
+                selected,
+                query,
+                items,
+                ..
+            }) => (*selected, query.len(), items.len(), 2),
+            Some(Modal::VaultPicker { selected }) => (*selected, 0, 0, 3),
+            Some(Modal::Prompt { draft, .. }) => (0, draft.len(), 0, 4),
+            Some(Modal::Confirm { .. }) => (0, 0, 0, 5),
+            Some(Modal::Notice { .. }) => (0, 0, 0, 6),
+            None => (0, 0, 0, 0),
+        };
+        Self {
+            pane: app.pane,
+            show_help: app.show_help,
+            help_scroll: app.help_scroll,
+            show_theme: app.show_theme,
+            theme_sel: app.theme_editor.as_ref().map(|e| e.selected).unwrap_or(0),
+            has_modal: app.modal.is_some(),
+            modal_sel,
+            modal_q,
+            modal_n,
+            prompt_kind,
+            editor_mode: app.editor.mode,
+            editor_cursor: app.editor.cursor(),
+            editor_dirty: app.editor.dirty,
+            editor_scroll: app.editor.scroll,
+            editor_off: app.editor.scroll_off,
+            editor_cmd: app.editor.cmdline.len(),
+            editor_rel: app.editor.rel.clone(),
+            editor_lines: app.editor.line_count(),
+            editor_chars: app.editor.len_chars(),
+            editor_visual_line: app.editor.visual_linewise(),
+            tree_sel: app.tree.selected,
+            tree_scroll: app.tree.scroll,
+            tree_filter: app.tree.filter.len(),
+            tree_filtering: app.tree.filtering,
+            tree_collapsed: app.tree.collapsed.len(),
+            preview_scroll: app.preview_scroll,
+            preview_visible: app.preview_visible,
+            wrap_notes: app.wrap_notes,
+            zen: app.zen,
+            focus: app.focus,
+            explore: app.explore,
+            tree_split: app.tree_split,
+            preview_split: app.preview_split,
+            toasts: app.toasts.len(),
+            git_state: app.git.state,
+            ai_size: app.ai.size,
+            ai_draft: app.ai.draft.len(),
+            ai_stream: app.ai.stream.len(),
+            ai_scroll: app.ai.scroll,
+            ai_transcript: app.ai.transcript.len(),
+            busy: app.is_busy(),
+            should_quit: app.should_quit,
+        }
+    }
+}
+
+fn dispatch_event(app: &mut App, evt: Event) -> Result<()> {
     if app.show_help {
         return handle_help(app, evt);
     }
@@ -305,6 +438,22 @@ fn handle_key(app: &mut App, k: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
+    if k.modifiers.contains(KeyModifiers::CONTROL) {
+        match k.code {
+            KeyCode::Char('o') => {
+                app.leader = Leader::None;
+                app.jump_back();
+                return Ok(());
+            }
+            KeyCode::Char('i') => {
+                app.leader = Leader::None;
+                app.jump_forward();
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     if app.tree.filtering {
         return handle_filter_key(app, k);
     }
@@ -463,6 +612,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
         }
         MouseEventKind::Up(MouseButton::Left) if app.split_drag.is_some() => {
             app.split_drag = None;
+            app.save_session();
         }
         MouseEventKind::Down(MouseButton::Left) if hit_tree_split(app, m.column, m.row) => {
             app.split_drag = Some(SplitDrag::Tree);
@@ -528,6 +678,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
         }
         MouseEventKind::Down(MouseButton::Left) if contains(app.preview_area, m.column, m.row) => {
             app.pane = Pane::Preview;
+            app.preview_follow_at(m.column, m.row);
         }
         MouseEventKind::ScrollUp if contains(app.editor_area, m.column, m.row) => {
             app.pane = Pane::Editor;
