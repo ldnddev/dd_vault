@@ -86,6 +86,31 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
         keys: ":ai off",
     },
     PaletteItem {
+        id: "ai-openrouter",
+        label: "Use OpenRouter",
+        keys: ":ai provider openrouter",
+    },
+    PaletteItem {
+        id: "ai-ollama",
+        label: "Use local Ollama",
+        keys: ":ai provider ollama",
+    },
+    PaletteItem {
+        id: "ai-spacexai",
+        label: "Use SpaceXAI",
+        keys: ":ai provider spacexai",
+    },
+    PaletteItem {
+        id: "ai-key",
+        label: "Set AI API key",
+        keys: ":ai key",
+    },
+    PaletteItem {
+        id: "ai-model",
+        label: "Set AI model",
+        keys: ":ai model",
+    },
+    PaletteItem {
         id: "focus",
         label: "Focus mode (hide tree)",
         keys: "<Space>z",
@@ -218,6 +243,11 @@ impl App {
             "ai" => self.cycle_ai_card(),
             "ai-on" => self.ai_enable(),
             "ai-off" => self.ai_disable(),
+            "ai-openrouter" => self.set_ai_provider("openrouter"),
+            "ai-ollama" => self.set_ai_provider("ollama"),
+            "ai-spacexai" => self.set_ai_provider("spacexai"),
+            "ai-key" => self.prompt_ai_key(false),
+            "ai-model" => self.prompt_ai_model(),
             "focus" => self.toggle_focus(),
             "zen" => self.toggle_zen(),
             "explore" => self.toggle_explore(),

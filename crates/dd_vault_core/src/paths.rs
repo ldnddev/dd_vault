@@ -36,6 +36,11 @@ impl Paths {
     pub fn credentials_file(&self) -> PathBuf {
         self.ldnddev_dir().join("credentials")
     }
+
+    /// Per-provider AI API keys (`0600`). Never stored inside a vault.
+    pub fn ai_keys_file(&self) -> PathBuf {
+        self.ldnddev_dir().join("ai.keys")
+    }
 }
 
 pub fn metadata_dir_name(vault_name: &str) -> String {

@@ -76,6 +76,12 @@ pub enum Action {
     AiOn,
     AiOff,
     AiPrompt(String),
+    /// Empty name opens the provider prompt.
+    AiProvider(String),
+    /// `None` opens the key prompt; `Some` stores the key.
+    AiKey(Option<String>),
+    /// `None` opens the model prompt; `Some` sets the model id.
+    AiModel(Option<String>),
     Error(String),
     Info(String),
     /// Yanked text (`y`, `yy`, visual `y`) for the OS clipboard.
@@ -877,6 +883,23 @@ impl Editor {
                     None => Action::AiToggle,
                     Some("on") if rest.len() == 1 => Action::AiOn,
                     Some("off") if rest.len() == 1 => Action::AiOff,
+                    Some("provider") => {
+                        Action::AiProvider(rest.get(1).copied().unwrap_or("").into())
+                    }
+                    Some("key") => {
+                        if rest.len() == 1 {
+                            Action::AiKey(None)
+                        } else {
+                            Action::AiKey(Some(rest[1..].join(" ")))
+                        }
+                    }
+                    Some("model") => {
+                        if rest.len() == 1 {
+                            Action::AiModel(None)
+                        } else {
+                            Action::AiModel(Some(rest[1..].join(" ")))
+                        }
+                    }
                     _ => Action::AiPrompt(rest.join(" ")),
                 }
             }

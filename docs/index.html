@@ -167,7 +167,7 @@
     <p>You need <strong>Linux or macOS</strong>, <strong>Rust 1.82+</strong> (<a href="https://rustup.rs">rustup</a>), <code>cargo</code>, and <code>git</code> on your <code>PATH</code>.</p>
     <ul class="plain">
       <li>Optional for git sync: SSH agent or a mode-<code>0600</code> credential file at <code>~/.config/ldnddev/credentials</code>.</li>
-      <li>Optional for AI: <code>XAI_API_KEY</code> (SpaceXAI) or a local CLI (<code>ollama</code>, <code>grok</code>, <code>llm</code>).</li>
+      <li>Optional for AI: a key in <code>~/.config/ldnddev/ai.keys</code> (mode 0600), <code>XAI_API_KEY</code> / <code>OPENROUTER_API_KEY</code>, or local <code>ollama serve</code>.</li>
     </ul>
     <p>Config lives under <code>~/.config/ldnddev/</code> (or <code>$XDG_CONFIG_HOME/ldnddev/</code>):</p>
     <table>
@@ -175,7 +175,8 @@
       <tbody>
         <tr><td><code>vaults.toml</code></td><td>Registered vaults and last opened path</td></tr>
         <tr><td><code>dd_vault_theme.yml</code></td><td>Global theme (local <code>./dd_vault_theme.yml</code> wins)</td></tr>
-        <tr><td><code>config.toml</code></td><td><code>[ai]</code> enable/allowlist, extra secret-scan patterns</td></tr>
+        <tr><td><code>config.toml</code></td><td><code>[ai]</code> enable/allowlist/provider/model, extra secret-scan patterns</td></tr>
+        <tr><td><code>ai.keys</code></td><td>Per-provider AI API keys, must be mode 0600</td></tr>
         <tr><td><code>credentials</code></td><td>Git credential-store, must be mode 0600</td></tr>
       </tbody>
     </table>
@@ -230,7 +231,7 @@ dd_vault --reindex ~/Notes</pre>
     </figure>
 
     <h3>AI (opt-in)</h3>
-    <p>Off until <kbd>:ai on</kbd>. <kbd>Space</kbd> <kbd>a</kbd> <kbd>i</kbd> cycles collapsed → chat → full. Each request lists what will be sent; <kbd>y</kbd> confirms. Default provider is SpaceXAI (<code>grok-4.6</code>, <code>XAI_API_KEY</code>). <kbd>Esc</kbd> cancels a stream.</p>
+    <p>Off until <kbd>:ai on</kbd>. <kbd>Space</kbd> <kbd>a</kbd> <kbd>i</kbd> cycles collapsed → chat → full. Each request lists what will be sent; <kbd>y</kbd> confirms. Default provider is SpaceXAI (<code>grok-4.6</code>). <kbd>:ai provider openrouter</kbd> prompts for an OpenRouter key (saved in <code>ai.keys</code>, or <code>OPENROUTER_API_KEY</code>). <kbd>:ai provider ollama</kbd> uses a local Ollama daemon at <code>http://127.0.0.1:11434/v1</code>. <kbd>:ai model</kbd> sets the model id. <kbd>Esc</kbd> cancels a stream.</p>
     <figure>
       <img src="screenshots/05-ai.jpg" width="1280" height="720" alt="Expanded AI chat card overlay">
       <figcaption>AI card. Badge is off, net, or local.</figcaption>
@@ -266,7 +267,7 @@ dd_vault --reindex ~/Notes</pre>
         <tr><td><kbd>Space</kbd> <kbd>v</kbd> <kbd>v</kbd></td><td>Vault picker</td></tr>
         <tr><td><kbd>Space</kbd> <kbd>p</kbd></td><td>Toggle preview</td></tr>
         <tr><td><kbd>:git pull|push|commit</kbd></td><td>Sync</td></tr>
-        <tr><td><kbd>:ai on</kbd> / <kbd>:ai …</kbd></td><td>Enable AI / prompt</td></tr>
+        <tr><td><kbd>:ai on</kbd> / <kbd>:ai provider</kbd> / <kbd>:ai key</kbd></td><td>Enable AI, switch OpenRouter or local Ollama, store a key</td></tr>
       </tbody>
     </table>
     <p>Leader <kbd>Space</kbd> is NORMAL/tree only, not INSERT.</p>

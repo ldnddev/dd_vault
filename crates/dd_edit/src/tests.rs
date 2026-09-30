@@ -215,6 +215,40 @@ fn command_git_subcommands() {
         e.handle(Key::Char(c));
     }
     assert_eq!(e.handle(Key::Enter), Action::AiPrompt("hi".into()));
+    e.handle(Key::Char(':'));
+    for c in "ai provider openrouter".chars() {
+        e.handle(Key::Char(c));
+    }
+    assert_eq!(
+        e.handle(Key::Enter),
+        Action::AiProvider("openrouter".into())
+    );
+    e.handle(Key::Char(':'));
+    for c in "ai provider".chars() {
+        e.handle(Key::Char(c));
+    }
+    assert_eq!(e.handle(Key::Enter), Action::AiProvider(String::new()));
+    e.handle(Key::Char(':'));
+    for c in "ai key".chars() {
+        e.handle(Key::Char(c));
+    }
+    assert_eq!(e.handle(Key::Enter), Action::AiKey(None));
+    e.handle(Key::Char(':'));
+    for c in "ai key sk-or-v1-abc".chars() {
+        e.handle(Key::Char(c));
+    }
+    assert_eq!(
+        e.handle(Key::Enter),
+        Action::AiKey(Some("sk-or-v1-abc".into()))
+    );
+    e.handle(Key::Char(':'));
+    for c in "ai model openrouter/auto".chars() {
+        e.handle(Key::Char(c));
+    }
+    assert_eq!(
+        e.handle(Key::Enter),
+        Action::AiModel(Some("openrouter/auto".into()))
+    );
 }
 
 #[test]

@@ -1,5 +1,6 @@
-//! Opt-in AI providers: SpaceXAI first, then generic OpenAI-compatible and local CLIs.
+//! Opt-in AI providers: SpaceXAI first, then OpenRouter, OpenAI-compatible HTTP, and local CLIs.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +15,15 @@ use serde::{Deserialize, Serialize};
 pub const SPACEXAI_BASE: &str = "https://api.x.ai/v1";
 /// Current SpaceXAI chat/code model from https://docs.x.ai/developers/models (2026-09).
 pub const SPACEXAI_MODEL: &str = "grok-4.6";
+pub const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
+/// OpenRouter auto-router (https://openrouter.ai/docs).
+pub const OPENROUTER_MODEL: &str = "openrouter/auto";
+pub const OPENAI_BASE: &str = "https://api.openai.com/v1";
+pub const OLLAMA_BASE: &str = "http://127.0.0.1:11434/v1";
+pub const OLLAMA_MODEL: &str = "llama3.2";
+const OPENROUTER_REFERER: &str = "https://github.com/ldnddev/dd_vault";
+const OPENROUTER_TITLE: &str = "dd_vault";
+pub const KEYS_FILENAME: &str = "ai.keys";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -21,8 +31,12 @@ pub enum Error {
     Disabled,
     #[error("provider {0} is not on the allowlist")]
     NotAllowed(String),
-    #[error("missing API key ({0})")]
+    #[error("missing API key ({0}); paste one with :ai key")]
     MissingKey(&'static str),
+    #[error("unknown AI provider: {0}")]
+    UnknownProvider(String),
+    #[error("AI keys file {0} must be mode 0600 (found {1:04o})")]
+    KeysMode(String, u32),
     #[error("AI request cancelled")]
     Cancelled,
     #[error("{0}")]
@@ -44,6 +58,98 @@ impl Kind {
             Self::Local => "local",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderInfo {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub kind: Kind,
+    pub env_var: Option<&'static str>,
+    pub default_model: &'static str,
+    pub default_base: Option<&'static str>,
+    pub cli: bool,
+}
+
+pub const PROVIDERS: &[ProviderInfo] = &[
+    ProviderInfo {
+        id: "spacexai",
+        label: "SpaceXAI",
+        kind: Kind::Network,
+        env_var: Some("XAI_API_KEY"),
+        default_model: SPACEXAI_MODEL,
+        default_base: Some(SPACEXAI_BASE),
+        cli: false,
+    },
+    ProviderInfo {
+        id: "openrouter",
+        label: "OpenRouter",
+        kind: Kind::Network,
+        env_var: Some("OPENROUTER_API_KEY"),
+        default_model: OPENROUTER_MODEL,
+        default_base: Some(OPENROUTER_BASE),
+        cli: false,
+    },
+    ProviderInfo {
+        id: "openai",
+        label: "OpenAI",
+        kind: Kind::Network,
+        env_var: Some("OPENAI_API_KEY"),
+        default_model: "gpt-4o-mini",
+        default_base: Some(OPENAI_BASE),
+        cli: false,
+    },
+    ProviderInfo {
+        id: "ollama",
+        label: "Ollama (local)",
+        kind: Kind::Local,
+        env_var: None,
+        default_model: OLLAMA_MODEL,
+        default_base: Some(OLLAMA_BASE),
+        cli: false,
+    },
+    ProviderInfo {
+        id: "grok-cli",
+        label: "grok CLI",
+        kind: Kind::Local,
+        env_var: None,
+        default_model: SPACEXAI_MODEL,
+        default_base: None,
+        cli: true,
+    },
+    ProviderInfo {
+        id: "llm",
+        label: "llm CLI",
+        kind: Kind::Local,
+        env_var: None,
+        default_model: OLLAMA_MODEL,
+        default_base: None,
+        cli: true,
+    },
+];
+
+pub fn provider_info(id: &str) -> Option<&'static ProviderInfo> {
+    PROVIDERS.iter().find(|p| p.id == id)
+}
+
+/// Known ids, plus `local` → `ollama`.
+pub fn parse_provider(name: &str) -> Result<&'static str, Error> {
+    let n = name.trim().to_ascii_lowercase();
+    let id = match n.as_str() {
+        "local" => "ollama",
+        other => other,
+    };
+    provider_info(id)
+        .map(|p| p.id)
+        .ok_or_else(|| Error::UnknownProvider(name.trim().to_string()))
+}
+
+pub fn provider_ids_hint() -> String {
+    PROVIDERS
+        .iter()
+        .map(|p| p.id)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +194,9 @@ pub struct AiSettings {
     pub base_url: String,
     #[serde(default)]
     pub allow: Vec<String>,
+    /// `~/.config/ldnddev/ai.keys` (mode 0600). Not written to config.toml.
+    #[serde(skip)]
+    pub keys_path: Option<PathBuf>,
 }
 
 fn default_provider() -> String {
@@ -105,6 +214,7 @@ impl Default for AiSettings {
             model: default_model(),
             base_url: String::new(),
             allow: Vec::new(),
+            keys_path: None,
         }
     }
 }
@@ -117,10 +227,13 @@ impl AiSettings {
         let Ok(v) = text.parse::<toml::Value>() else {
             return Self::default();
         };
-        v.get("ai")
+        let mut loaded: Self = v
+            .get("ai")
             .cloned()
             .and_then(|a| a.try_into().ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        loaded.keys_path = config_toml.parent().map(|p| p.join(KEYS_FILENAME));
+        loaded
     }
 
     pub fn save(&self, config_toml: &Path) -> Result<(), Error> {
@@ -142,10 +255,66 @@ impl AiSettings {
     }
 
     pub fn provider_kind(&self) -> Kind {
-        match self.provider.as_str() {
-            "ollama" | "grok-cli" | "llm" => Kind::Local,
-            _ => Kind::Network,
+        provider_info(&self.provider)
+            .map(|p| p.kind)
+            .unwrap_or(Kind::Network)
+    }
+
+    pub fn info(&self) -> Option<&'static ProviderInfo> {
+        provider_info(&self.provider)
+    }
+
+    pub fn needs_key(&self) -> bool {
+        self.info().and_then(|p| p.env_var).is_some()
+    }
+
+    pub fn env_var(&self) -> Option<&'static str> {
+        self.info().and_then(|p| p.env_var)
+    }
+
+    pub fn is_cli(&self) -> bool {
+        self.info().map(|p| p.cli).unwrap_or(false)
+    }
+
+    /// Env var first, then `ai.keys` (0600).
+    pub fn has_api_key(&self) -> bool {
+        if !self.needs_key() {
+            return true;
         }
+        if let Some(var) = self.env_var() {
+            if std::env::var(var)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .is_some()
+            {
+                return true;
+            }
+        }
+        matches!(self.stored_key(), Ok(Some(k)) if !k.trim().is_empty())
+    }
+
+    pub fn stored_key(&self) -> Result<Option<String>, Error> {
+        let Some(path) = &self.keys_path else {
+            return Ok(None);
+        };
+        read_key(path, &self.provider)
+    }
+
+    pub fn set_stored_key(&self, key: &str) -> Result<(), Error> {
+        let path = self
+            .keys_path
+            .as_ref()
+            .ok_or_else(|| Error::Msg("no config dir to store an API key".into()))?;
+        write_key(path, &self.provider, key)
+    }
+
+    pub fn apply_provider(&mut self, name: &str) -> Result<&'static ProviderInfo, Error> {
+        let id = parse_provider(name)?;
+        let info = provider_info(id).expect("parse_provider validates");
+        self.provider = info.id.to_string();
+        self.model = info.default_model.to_string();
+        self.base_url.clear();
+        Ok(info)
     }
 
     pub fn provider_id(&self) -> &str {
@@ -168,11 +337,14 @@ impl AiSettings {
     }
 
     pub fn resolved_model(&self) -> String {
-        if self.provider == "ollama" && self.model.starts_with("grok-") {
-            return "llama3.2".into();
-        }
         if self.model.is_empty() {
-            return default_model();
+            return self
+                .info()
+                .map(|p| p.default_model.to_string())
+                .unwrap_or_else(default_model);
+        }
+        if self.provider == "ollama" && self.model.starts_with("grok-") {
+            return OLLAMA_MODEL.into();
         }
         self.model.clone()
     }
@@ -181,11 +353,90 @@ impl AiSettings {
         if !self.base_url.is_empty() {
             return self.base_url.trim_end_matches('/').to_string();
         }
-        match self.provider.as_str() {
-            "openai" => "https://api.openai.com/v1".into(),
-            _ => SPACEXAI_BASE.to_string(),
+        self.info()
+            .and_then(|p| p.default_base)
+            .unwrap_or(SPACEXAI_BASE)
+            .trim_end_matches('/')
+            .to_string()
+    }
+}
+
+fn keys_mode_ok(path: &Path) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            return Err(Error::KeysMode(path.display().to_string(), mode));
         }
     }
+    Ok(())
+}
+
+fn read_key_file(path: &Path) -> Result<HashMap<String, String>, Error> {
+    if !path.is_file() {
+        return Ok(HashMap::new());
+    }
+    keys_mode_ok(path)?;
+    let text = fs::read_to_string(path)?;
+    if text.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+    let map: HashMap<String, String> =
+        toml::from_str(&text).map_err(|e| Error::Msg(e.to_string()))?;
+    Ok(map)
+}
+
+fn read_key(path: &Path, provider: &str) -> Result<Option<String>, Error> {
+    let map = read_key_file(path)?;
+    Ok(map.get(provider).cloned().filter(|s| !s.trim().is_empty()))
+}
+
+fn write_key(path: &Path, provider: &str, key: &str) -> Result<(), Error> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut map = if path.is_file() {
+        match keys_mode_ok(path) {
+            Ok(()) => read_key_file(path)?,
+            Err(Error::KeysMode(_, _)) => HashMap::new(),
+            Err(e) => return Err(e),
+        }
+    } else {
+        HashMap::new()
+    };
+    let key = key.trim();
+    if key.is_empty() {
+        map.remove(provider);
+    } else {
+        map.insert(provider.to_string(), key.to_string());
+    }
+    let body = toml::to_string_pretty(&map).map_err(|e| Error::Msg(e.to_string()))?;
+    fs::write(path, body)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+pub fn resolve_api_key(settings: &AiSettings) -> Result<String, Error> {
+    if !settings.needs_key() {
+        return Ok(String::new());
+    }
+    let var = settings.env_var().unwrap_or("API_KEY");
+    if let Ok(k) = std::env::var(var) {
+        if !k.trim().is_empty() {
+            return Ok(k);
+        }
+    }
+    if let Some(k) = settings.stored_key()? {
+        return Ok(k);
+    }
+    Err(Error::MissingKey(var))
 }
 
 pub fn redact(s: &str) -> String {
@@ -271,9 +522,10 @@ pub fn start_completion(
             send(Err(Error::Disabled));
             return;
         }
-        let result = match settings.provider.as_str() {
-            "ollama" | "grok-cli" | "llm" => run_cli(&settings, &req, &cancel, &tx),
-            _ => run_http(&settings, &req, &cancel, &tx),
+        let result = if settings.is_cli() {
+            run_cli(&settings, &req, &cancel, &tx)
+        } else {
+            run_http(&settings, &req, &cancel, &tx)
         };
         match result {
             Ok(()) => send(Ok(Delta::Done)),
@@ -290,15 +542,7 @@ fn run_http(
     cancel: &Arc<AtomicBool>,
     tx: &mpsc::Sender<Result<Delta, Error>>,
 ) -> Result<(), Error> {
-    let key_var = if settings.provider == "openai" {
-        "OPENAI_API_KEY"
-    } else {
-        "XAI_API_KEY"
-    };
-    let key = std::env::var(key_var).map_err(|_| Error::MissingKey(key_var))?;
-    if key.trim().is_empty() {
-        return Err(Error::MissingKey(key_var));
-    }
+    let key = resolve_api_key(settings)?;
     let url = format!("{}/chat/completions", settings.resolved_base());
     let body = serde_json::json!({
         "model": req.model,
@@ -312,13 +556,29 @@ fn run_http(
         .timeout(std::time::Duration::from_secs(180))
         .build()
         .map_err(|e| Error::Msg(e.to_string()))?;
-    let mut resp = client
+    let mut req_builder = client
         .post(&url)
-        .bearer_auth(key)
         .header("content-type", "application/json")
-        .json(&body)
-        .send()
-        .map_err(|e| Error::Msg(e.to_string()))?;
+        .json(&body);
+    if !key.trim().is_empty() {
+        req_builder = req_builder.bearer_auth(key.trim());
+    }
+    if settings.provider == "openrouter" {
+        req_builder = req_builder
+            .header("HTTP-Referer", OPENROUTER_REFERER)
+            .header("X-OpenRouter-Title", OPENROUTER_TITLE)
+            .header("X-Title", OPENROUTER_TITLE);
+    }
+    let mut resp = req_builder.send().map_err(|e| {
+        if settings.provider == "ollama" {
+            Error::Msg(format!(
+                "ollama is not reachable at {} (start `ollama serve`): {e}",
+                settings.resolved_base()
+            ))
+        } else {
+            Error::Msg(e.to_string())
+        }
+    })?;
     if !resp.status().is_success() {
         let status = resp.status();
         let t = resp.text().unwrap_or_default();
@@ -359,11 +619,6 @@ fn run_cli(
 ) -> Result<(), Error> {
     let model = req.model.clone();
     let mut cmd = match settings.provider.as_str() {
-        "ollama" => {
-            let mut c = Command::new("ollama");
-            c.args(["run", &model]);
-            c
-        }
         "grok-cli" => Command::new("grok"),
         "llm" => {
             let mut c = Command::new("llm");
@@ -526,8 +781,59 @@ mod tests {
         s.save(&path).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("secret_patterns"), "{text}");
+        assert!(!text.contains("keys_path"), "{text}");
         let loaded = AiSettings::load(&path);
         assert!(loaded.enabled);
         assert_eq!(loaded.allow, vec!["spacexai"]);
+        assert_eq!(
+            loaded.keys_path.as_deref(),
+            Some(dir.path().join(KEYS_FILENAME).as_path())
+        );
+    }
+
+    #[test]
+    fn openrouter_and_ollama_resolve() {
+        let mut s = AiSettings::default();
+        s.apply_provider("openrouter").unwrap();
+        assert_eq!(s.provider, "openrouter");
+        assert_eq!(s.resolved_model(), OPENROUTER_MODEL);
+        assert_eq!(s.resolved_base(), OPENROUTER_BASE);
+        assert_eq!(s.provider_kind(), Kind::Network);
+        assert!(s.needs_key());
+        s.apply_provider("local").unwrap();
+        assert_eq!(s.provider, "ollama");
+        assert_eq!(s.resolved_model(), OLLAMA_MODEL);
+        assert_eq!(s.resolved_base(), OLLAMA_BASE);
+        assert_eq!(s.provider_kind(), Kind::Local);
+        assert!(!s.needs_key());
+        assert!(s.has_api_key());
+        assert!(parse_provider("nope").is_err());
+    }
+
+    #[test]
+    fn stored_key_roundtrip_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = AiSettings {
+            provider: "openrouter".into(),
+            keys_path: Some(dir.path().join(KEYS_FILENAME)),
+            ..Default::default()
+        };
+        assert!(s.stored_key().unwrap().is_none());
+        s.set_stored_key("sk-or-v1-testsecret").unwrap();
+        let path = s.keys_path.as_ref().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "ai.keys must be 0600");
+        }
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains("openrouter"));
+        assert!(text.contains("sk-or-v1-testsecret"));
+        assert_eq!(
+            s.stored_key().unwrap().as_deref(),
+            Some("sk-or-v1-testsecret")
+        );
+        assert!(s.has_api_key());
     }
 }

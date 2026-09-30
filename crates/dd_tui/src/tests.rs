@@ -847,6 +847,68 @@ fn ai_scripted_consent_inserts() {
 }
 
 #[test]
+fn ai_provider_openrouter_prompts_for_key() {
+    let (_dir, mut app) = vault_app();
+    app.set_ai_provider("openrouter");
+    assert_eq!(app.ai.settings.provider, "openrouter");
+    assert_eq!(app.ai.settings.resolved_model(), dd_ai::OPENROUTER_MODEL);
+    let env_set = std::env::var("OPENROUTER_API_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_some();
+    if env_set {
+        assert!(app.modal.is_none());
+    } else {
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Prompt {
+                kind: crate::app::PromptKind::AiKey { .. },
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn ai_provider_ollama_is_local_without_key_prompt() {
+    let (_dir, mut app) = vault_app();
+    app.set_ai_provider("local");
+    assert_eq!(app.ai.settings.provider, "ollama");
+    assert_eq!(app.ai.settings.provider_kind(), dd_ai::Kind::Local);
+    assert!(app.modal.is_none());
+    assert!(app
+        .toasts
+        .iter()
+        .any(|t| t.message.contains("ollama") && t.message.contains("local")));
+}
+
+#[test]
+fn ai_key_prompt_saves_0600_file() {
+    let (dir, mut app) = vault_app();
+    app.set_ai_provider("openrouter");
+    app.prompt_ai_key(false);
+    send_key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('k'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('-'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.modal.is_none());
+    let keys = dir.path().join("cfg/ldnddev/ai.keys");
+    let text = std::fs::read_to_string(&keys).expect("ai.keys");
+    assert!(text.contains("openrouter"), "{text}");
+    assert!(text.contains("sk-or"), "{text}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&keys).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+    let drawn = buffer_text(&mut app, 80, 18);
+    assert!(!drawn.contains("sk-or"), "key must not be echoed: {drawn}");
+}
+
+#[test]
 fn space_z_hides_tree_keeps_chrome() {
     let (_dir, mut app) = vault_app();
     let _ = buffer_text(&mut app, 100, 24);

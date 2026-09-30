@@ -5,11 +5,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
-use dd_ai::{log_request, start_completion, AiSettings, Delta, Error as AiError, Request, Task};
+use dd_ai::{
+    log_request, provider_ids_hint, start_completion, AiSettings, Delta, Error as AiError, Request,
+    Task,
+};
 use dd_vault_core::parse_note;
 use ratatui::layout::Rect;
 
-use crate::app::{App, ConfirmKind, Leader, Modal};
+use crate::app::{App, ConfirmKind, Leader, Modal, PromptKind};
 use crate::toasts::ToastLevel;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -87,10 +90,20 @@ impl App {
     pub fn load_ai_settings(&mut self) {
         if let Some(paths) = &self.paths {
             self.ai.settings = AiSettings::load(&paths.ldnddev_dir().join("config.toml"));
+            self.ai.settings.keys_path = Some(paths.ai_keys_file());
+        }
+    }
+
+    fn ensure_ai_keys_path(&mut self) {
+        if self.ai.settings.keys_path.is_none() {
+            if let Some(paths) = &self.paths {
+                self.ai.settings.keys_path = Some(paths.ai_keys_file());
+            }
         }
     }
 
     fn persist_ai_settings(&mut self) {
+        self.ensure_ai_keys_path();
         let Some(paths) = &self.paths else {
             return;
         };
@@ -117,6 +130,11 @@ impl App {
     }
 
     pub fn ai_enable(&mut self) {
+        self.ensure_ai_keys_path();
+        if self.ai.settings.needs_key() && !self.ai.settings.has_api_key() {
+            self.prompt_ai_key(true);
+            return;
+        }
         self.ai.settings.enable_current();
         self.persist_ai_settings();
         self.push_toast(
@@ -133,6 +151,114 @@ impl App {
         self.ai.settings.disable();
         self.persist_ai_settings();
         self.push_toast(ToastLevel::Info, "AI off");
+    }
+
+    pub fn prompt_ai_provider(&mut self) {
+        self.modal = Some(Modal::Prompt {
+            kind: PromptKind::AiProvider,
+            draft: self.ai.settings.provider.clone(),
+        });
+    }
+
+    pub fn set_ai_provider(&mut self, name: &str) {
+        self.ensure_ai_keys_path();
+        match self.ai.settings.apply_provider(name) {
+            Ok(info) => {
+                if self.ai.settings.enabled {
+                    self.ai.settings.enable_current();
+                }
+                self.persist_ai_settings();
+                self.modal = None;
+                if info.env_var.is_some() && !self.ai.settings.has_api_key() {
+                    self.push_toast(
+                        ToastLevel::Info,
+                        format!("{} selected — paste an API key", info.label),
+                    );
+                    self.prompt_ai_key(self.ai.settings.enabled);
+                    return;
+                }
+                let extra = if info.kind == dd_ai::Kind::Local {
+                    " (local)"
+                } else {
+                    ""
+                };
+                self.push_toast(
+                    ToastLevel::Success,
+                    format!("AI provider: {}{extra}", info.id),
+                );
+            }
+            Err(err) => {
+                self.push_toast(
+                    ToastLevel::Error,
+                    format!("{err}. Try: {}", provider_ids_hint()),
+                );
+            }
+        }
+    }
+
+    pub fn prompt_ai_key(&mut self, then_enable: bool) {
+        self.modal = Some(Modal::Prompt {
+            kind: PromptKind::AiKey { then_enable },
+            draft: String::new(),
+        });
+    }
+
+    pub fn submit_ai_key(&mut self, key: String, then_enable: bool) {
+        self.ensure_ai_keys_path();
+        let key = key.trim().to_string();
+        if key.is_empty() {
+            self.push_toast(ToastLevel::Warning, "Empty API key");
+            return;
+        }
+        if !self.ai.settings.needs_key() {
+            self.modal = None;
+            self.push_toast(
+                ToastLevel::Info,
+                format!("{} does not use an API key", self.ai.settings.provider),
+            );
+            return;
+        }
+        match self.ai.settings.set_stored_key(&key) {
+            Ok(()) => {
+                self.modal = None;
+                if then_enable {
+                    self.ai.settings.enable_current();
+                    self.persist_ai_settings();
+                    if self.ai.size == AiSize::Collapsed {
+                        self.cycle_ai_card();
+                    }
+                    self.push_toast(
+                        ToastLevel::Success,
+                        format!("AI on ({}) — key saved", self.ai.settings.provider),
+                    );
+                } else {
+                    self.push_toast(
+                        ToastLevel::Success,
+                        format!("{} key saved", self.ai.settings.provider),
+                    );
+                }
+            }
+            Err(err) => self.push_toast(ToastLevel::Error, err.to_string()),
+        }
+    }
+
+    pub fn prompt_ai_model(&mut self) {
+        self.modal = Some(Modal::Prompt {
+            kind: PromptKind::AiModel,
+            draft: self.ai.settings.resolved_model(),
+        });
+    }
+
+    pub fn submit_ai_model(&mut self, model: String) {
+        let model = model.trim().to_string();
+        if model.is_empty() {
+            self.push_toast(ToastLevel::Warning, "Empty model id");
+            return;
+        }
+        self.ai.settings.model = model.clone();
+        self.persist_ai_settings();
+        self.modal = None;
+        self.push_toast(ToastLevel::Success, format!("AI model: {model}"));
     }
 
     pub fn cancel_ai_stream(&mut self) {
@@ -160,6 +286,18 @@ impl App {
                 ToastLevel::Warning,
                 "AI is off. :ai on to enable the current provider",
             );
+            return;
+        }
+        self.ensure_ai_keys_path();
+        if self.ai.scripted.is_none()
+            && self.ai.settings.needs_key()
+            && !self.ai.settings.has_api_key()
+        {
+            self.push_toast(
+                ToastLevel::Warning,
+                "No API key. Paste one, or set the provider env var",
+            );
+            self.prompt_ai_key(false);
             return;
         }
         if self.ai.size == AiSize::Collapsed {

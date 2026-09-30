@@ -114,6 +114,9 @@ pub enum PromptKind {
     New { parent: PathBuf },
     Rename { rel: PathBuf },
     GitCommit { then_push: bool },
+    AiProvider,
+    AiKey { then_enable: bool },
+    AiModel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -627,6 +630,21 @@ impl App {
             Action::AiOn => self.ai_enable(),
             Action::AiOff => self.ai_disable(),
             Action::AiPrompt(p) => self.request_ai(p, None),
+            Action::AiProvider(name) => {
+                if name.trim().is_empty() {
+                    self.prompt_ai_provider();
+                } else {
+                    self.set_ai_provider(&name);
+                }
+            }
+            Action::AiKey(key) => match key {
+                Some(k) => self.submit_ai_key(k, false),
+                None => self.prompt_ai_key(false),
+            },
+            Action::AiModel(model) => match model {
+                Some(m) => self.submit_ai_model(m),
+                None => self.prompt_ai_model(),
+            },
             Action::CopyClipboard(text) => self.copy_text_to_clipboard(&text),
             Action::FollowLink { from_gf } => self.follow_link(from_gf),
         }

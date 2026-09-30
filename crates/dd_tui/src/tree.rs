@@ -338,6 +338,21 @@ impl App {
         let Some(Modal::Prompt { kind, draft }) = self.modal.clone() else {
             return;
         };
+        match kind {
+            PromptKind::AiProvider => {
+                self.set_ai_provider(&draft);
+                return;
+            }
+            PromptKind::AiKey { then_enable } => {
+                self.submit_ai_key(draft, then_enable);
+                return;
+            }
+            PromptKind::AiModel => {
+                self.submit_ai_model(draft);
+                return;
+            }
+            PromptKind::New { .. } | PromptKind::Rename { .. } | PromptKind::GitCommit { .. } => {}
+        }
         let Some(vault) = self.vault.clone() else {
             self.modal = None;
             return;
@@ -407,6 +422,9 @@ impl App {
                     }
                     Err(err) => self.push_toast(ToastLevel::Error, err.to_string()),
                 }
+            }
+            PromptKind::AiProvider | PromptKind::AiKey { .. } | PromptKind::AiModel => {
+                unreachable!("AI prompts return before vault match")
             }
         }
     }

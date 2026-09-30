@@ -1204,6 +1204,11 @@ fn render_prompt(frame: &mut Frame, app: &App) {
         PromptKind::Rename { rel } => format!(" Rename {} ", rel.display()),
         PromptKind::GitCommit { then_push: false } => " Git commit message ".to_string(),
         PromptKind::GitCommit { then_push: true } => " Commit all changes, then push ".to_string(),
+        PromptKind::AiProvider => format!(" AI provider ({}) ", dd_ai::provider_ids_hint()),
+        PromptKind::AiKey { .. } => {
+            format!(" API key for {} ", app.ai.settings.provider)
+        }
+        PromptKind::AiModel => " AI model ".to_string(),
     };
     let area = centered_rect(70, 30, frame.area());
     frame.render_widget(Clear, area);
@@ -1223,8 +1228,27 @@ fn render_prompt(frame: &mut Frame, app: &App) {
         );
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let input = format!("{draft}█");
-    let hint = "Enter confirm   Esc cancel";
+    let input = match kind {
+        PromptKind::AiKey { .. } => {
+            let dots: String = "•".repeat(draft.chars().count());
+            format!("{dots}█")
+        }
+        _ => format!("{draft}█"),
+    };
+    let hint = match kind {
+        PromptKind::AiProvider => {
+            "openrouter · ollama (local) · spacexai   Enter confirm   Esc cancel"
+        }
+        PromptKind::AiKey { .. } => {
+            "stored in ~/.config/ldnddev/ai.keys (mode 0600)   Enter confirm   Esc cancel"
+        }
+        PromptKind::AiModel => match app.ai.settings.provider.as_str() {
+            "openrouter" => "e.g. openrouter/auto   Enter confirm   Esc cancel",
+            "ollama" => "e.g. llama3.2   Enter confirm   Esc cancel",
+            _ => "Enter confirm   Esc cancel",
+        },
+        _ => "Enter confirm   Esc cancel",
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
