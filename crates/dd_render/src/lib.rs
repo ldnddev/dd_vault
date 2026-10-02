@@ -5,8 +5,10 @@ use comrak::{parse_document, Arena, Options};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
+mod mermaid;
 mod term_image;
 
+pub use mermaid::render_mermaid;
 pub use term_image::{decode_rgba, encode_png_rgba, looks_like_image, rgba_to_half_block};
 
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +71,7 @@ struct RenderCtx<'a> {
     image: Option<&'a ImageResolver<'a>>,
     max_width: u16,
     max_image_rows: u16,
+    max_diagram_rows: u16,
 }
 
 pub fn render_markdown(
@@ -76,7 +79,7 @@ pub fn render_markdown(
     palette: PreviewPalette,
     embed: Option<&EmbedResolver<'_>>,
 ) -> Text<'static> {
-    render_markdown_ex(src, palette, embed, None, 80, 12)
+    render_markdown_ex(src, palette, embed, None, 80, 12, 32)
 }
 
 pub fn render_markdown_ex(
@@ -86,6 +89,7 @@ pub fn render_markdown_ex(
     image: Option<&ImageResolver<'_>>,
     max_width: u16,
     max_image_rows: u16,
+    max_diagram_rows: u16,
 ) -> Text<'static> {
     let expanded = expand_embeds(src, embed);
     let arena = Arena::new();
@@ -96,6 +100,7 @@ pub fn render_markdown_ex(
         image,
         max_width: max_width.max(1),
         max_image_rows: max_image_rows.max(1),
+        max_diagram_rows: max_diagram_rows.max(1),
     };
     walk_block(root, &ctx, &mut out, 0);
     while out
@@ -217,19 +222,11 @@ fn walk_block<'a>(
         NodeValue::Item(_) => walk_item(node, ctx, out, indent, None),
         NodeValue::TaskItem(sym) => walk_item(node, ctx, out, indent, Some(*sym)),
         NodeValue::CodeBlock(cb) => {
-            let info = cb.info.trim();
-            if !info.is_empty() {
-                let mut spans = prefix_spans(indent);
-                spans.push(Span::styled(format!("```{info}"), p.muted()));
-                out.push(Line::from(spans));
+            if is_mermaid_info(&cb.info) {
+                emit_mermaid(out, &cb.literal, ctx, indent);
+            } else {
+                emit_code_block(out, &cb.info, &cb.literal, p, indent);
             }
-            for line in cb.literal.replace('\r', "").split('\n') {
-                let mut spans = prefix_spans(indent);
-                spans.push(Span::styled("  ", p.muted()));
-                spans.push(Span::styled(line.to_string(), p.code()));
-                out.push(Line::from(spans));
-            }
-            out.push(blank());
         }
         NodeValue::ThematicBreak => {
             out.push(Line::from(Span::styled("─".repeat(24), p.muted())));
@@ -420,6 +417,69 @@ fn collect_inlines<'a>(
                 spans.push(Span::styled(format!("[[{label}]]"), p.link()));
             }
             _ => collect_inlines(c, ctx, spans, None, indent),
+        }
+    }
+}
+
+pub fn is_mermaid_info(info: &str) -> bool {
+    info.split_whitespace()
+        .next()
+        .is_some_and(|tok| tok.eq_ignore_ascii_case("mermaid"))
+}
+
+fn emit_code_block(
+    out: &mut Vec<Line<'static>>,
+    info: &str,
+    literal: &str,
+    p: PreviewPalette,
+    indent: usize,
+) {
+    let info = info.trim();
+    if !info.is_empty() {
+        let mut spans = prefix_spans(indent);
+        spans.push(Span::styled(format!("```{info}"), p.muted()));
+        out.push(Line::from(spans));
+    }
+    for line in literal.replace('\r', "").split('\n') {
+        let mut spans = prefix_spans(indent);
+        spans.push(Span::styled("  ", p.muted()));
+        spans.push(Span::styled(line.to_string(), p.code()));
+        out.push(Line::from(spans));
+    }
+    out.push(blank());
+}
+
+fn mermaid_status_line(ctx: &RenderCtx<'_>, indent: usize, msg: &str) -> Line<'static> {
+    let mut spans = prefix_spans(indent);
+    spans.push(Span::styled(
+        format!("▌ mermaid  {msg}"),
+        Style::default().fg(ctx.p.info),
+    ));
+    Line::from(spans)
+}
+
+fn emit_mermaid(out: &mut Vec<Line<'static>>, literal: &str, ctx: &RenderCtx<'_>, indent: usize) {
+    let width = ctx
+        .max_width
+        .saturating_sub((indent as u16).saturating_mul(2))
+        .max(8) as usize;
+    match render_mermaid(literal, width) {
+        Ok(rows) => {
+            let cap = ctx.max_diagram_rows.max(1) as usize;
+            for (i, row) in rows.iter().enumerate() {
+                if i >= cap {
+                    out.push(mermaid_status_line(ctx, indent, "…"));
+                    break;
+                }
+                let mut spans = prefix_spans(indent);
+                spans.push(Span::styled(row.clone(), Style::default().fg(ctx.p.info)));
+                out.push(Line::from(spans));
+            }
+            out.push(blank());
+        }
+        Err(err) => {
+            out.push(mermaid_status_line(ctx, indent, &err));
+            emit_code_block(out, "mermaid", literal, ctx.p, indent);
         }
     }
 }
@@ -616,7 +676,7 @@ mod tests {
                 None
             }
         };
-        let t = render_markdown_ex("![](red.png)", pal(), None, Some(&resolve), 8, 4);
+        let t = render_markdown_ex("![](red.png)", pal(), None, Some(&resolve), 8, 4, 8);
         let has_block = t.lines.iter().any(|l| {
             l.spans
                 .iter()
@@ -636,5 +696,50 @@ mod tests {
         let d = dump("![[shot.png]]");
         assert!(d.contains("[image:") || d.contains("shot.png"), "{d}");
         assert!(!d.contains("missing embed"), "{d}");
+    }
+
+    fn mermaid_src() -> &'static str {
+        "```mermaid\nflowchart LR\n  A --> B\n```\n"
+    }
+
+    fn dump_text(t: &ratatui::text::Text<'_>) -> String {
+        t.lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn mermaid_flowchart_draws_boxes() {
+        let t = render_markdown_ex(mermaid_src(), pal(), None, None, 40, 4, 16);
+        let d = dump_text(&t);
+        assert!(d.contains('┌') && d.contains('A'), "{d}");
+        assert!(d.contains('B'), "{d}");
+        assert!(d.contains('►'), "{d}");
+        assert!(!d.contains("A --> B"), "{d}");
+    }
+
+    #[test]
+    fn mermaid_unknown_keeps_source() {
+        let src = "```mermaid\ngantt\n  title Plan\n```\n";
+        let t = render_markdown_ex(src, pal(), None, None, 40, 4, 16);
+        let d = dump_text(&t);
+        assert!(d.contains("gantt"), "{d}");
+        assert!(d.contains("title Plan"), "{d}");
+    }
+
+    #[test]
+    fn mermaid_info_token() {
+        assert!(is_mermaid_info("mermaid"));
+        assert!(is_mermaid_info("MERMAID"));
+        assert!(is_mermaid_info("mermaid theme=dark"));
+        assert!(!is_mermaid_info("rust"));
+        assert!(!is_mermaid_info(""));
     }
 }

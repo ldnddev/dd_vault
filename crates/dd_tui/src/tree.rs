@@ -25,9 +25,10 @@ pub struct TreeState {
 impl TreeState {
     pub fn load(vault: &Vault) -> Self {
         let roots = walk_tree(&vault.root).unwrap_or_default();
+        let collapsed = all_dir_rels(&roots);
         Self {
             roots,
-            collapsed: HashSet::new(),
+            collapsed,
             selected: 0,
             scroll: 0,
             filter: String::new(),
@@ -37,8 +38,14 @@ impl TreeState {
 
     pub fn reload(&mut self, vault: &Vault) {
         let keep = self.selected_rel();
+        let mut expanded = all_dir_rels(&self.roots);
+        expanded.retain(|p| !self.collapsed.contains(p));
         self.roots = walk_tree(&vault.root).unwrap_or_default();
-        self.collapsed.retain(|p| vault.root.join(p).exists());
+        let mut collapsed = all_dir_rels(&self.roots);
+        for p in &expanded {
+            collapsed.remove(p);
+        }
+        self.collapsed = collapsed;
         if let Some(rel) = keep {
             self.select_rel(&rel);
         } else {
@@ -184,6 +191,21 @@ impl TreeState {
                 .map(Path::to_path_buf)
                 .unwrap_or_default(),
             None => PathBuf::new(),
+        }
+    }
+}
+
+fn all_dir_rels(nodes: &[FsNode]) -> HashSet<PathBuf> {
+    let mut out = HashSet::new();
+    collect_dir_rels(nodes, &mut out);
+    out
+}
+
+fn collect_dir_rels(nodes: &[FsNode], out: &mut HashSet<PathBuf>) {
+    for n in nodes {
+        if n.is_dir() {
+            out.insert(n.rel.clone());
+            collect_dir_rels(&n.children, out);
         }
     }
 }

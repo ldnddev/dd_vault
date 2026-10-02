@@ -402,6 +402,20 @@ fn wrap_scroll_moves_by_visual_rows() {
 }
 
 #[test]
+fn mouse_scroll_can_leave_caret() {
+    let mut e = ed("a\nb\nc\nd\ne\nf");
+    e.scroll_wrapped(3, 2, usize::MAX);
+    assert_eq!(e.scroll, 3);
+    assert_eq!(e.cursor_line_col().0, 0);
+    assert!(!e.follow_caret);
+    e.handle(Key::Char('j'));
+    assert!(e.follow_caret);
+    e.ensure_scroll_wrapped(2, usize::MAX);
+    assert_eq!(e.cursor_line_col().0, 1);
+    assert_eq!(e.scroll, 1);
+}
+
+#[test]
 fn unwrapped_scroll_still_tracks_buffer_lines() {
     let mut e = ed("a\nb\nc\nd\ne");
     e.handle(Key::Char('G'));
@@ -409,4 +423,6 @@ fn unwrapped_scroll_still_tracks_buffer_lines() {
     e.ensure_scroll_wrapped(2, usize::MAX);
     assert_eq!(e.scroll, 3);
     assert_eq!(e.scroll_off, 0);
+    assert_eq!(e.visual_len(usize::MAX), 5);
+    assert_eq!(e.visual_origin(usize::MAX), 3);
 }

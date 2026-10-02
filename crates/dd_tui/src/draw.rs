@@ -680,6 +680,7 @@ fn cached_preview_text(
     pal: dd_render::PreviewPalette,
     max_w: u16,
     max_rows: u16,
+    max_diagram_rows: u16,
 ) -> Text<'static> {
     let src = app.editor.text();
     let rel = app.editor.rel.clone();
@@ -689,6 +690,7 @@ fn cached_preview_text(
             && c.src == src
             && c.max_w == max_w
             && c.max_rows == max_rows
+            && c.max_diagram_rows == max_diagram_rows
             && c.pal == pal
             && c.epoch == epoch
         {
@@ -730,6 +732,7 @@ fn cached_preview_text(
         Some(&resolve_image),
         max_w,
         max_rows,
+        max_diagram_rows,
     );
     #[cfg(test)]
     {
@@ -740,6 +743,7 @@ fn cached_preview_text(
         src,
         max_w,
         max_rows,
+        max_diagram_rows,
         pal,
         epoch,
         text: text.clone(),
@@ -793,7 +797,8 @@ fn render_preview(frame: &mut Frame, app: &mut App, border: ratatui::style::Colo
     };
     let max_w = inner.width.saturating_sub(1).max(1);
     let max_rows = inner.height.clamp(1, 16);
-    let text = cached_preview_text(app, pal, max_w, max_rows);
+    let max_diagram_rows = inner.height.saturating_mul(2).clamp(16, 48);
+    let text = cached_preview_text(app, pal, max_w, max_rows, max_diagram_rows);
     let total = text.lines.len();
     let vis = inner.height as usize;
     let max_scroll = total.saturating_sub(vis);
@@ -849,8 +854,12 @@ fn render_editor(frame: &mut Frame, app: &mut App, editor_border: ratatui::style
     } else {
         inner.height
     };
-    app.editor
-        .ensure_scroll_wrapped(text_h as usize, app.editor_wrap_width());
+    let wrap_w = app.editor_wrap_width();
+    if app.editor.follow_caret {
+        app.editor.ensure_scroll_wrapped(text_h as usize, wrap_w);
+    } else {
+        app.editor.clamp_scroll_wrapped(text_h as usize, wrap_w);
+    }
 
     if app.editor.rel.is_none() {
         frame.render_widget(
@@ -883,6 +892,20 @@ fn render_editor(frame: &mut Frame, app: &mut App, editor_border: ratatui::style
         ),
         text_area,
     );
+
+    let total = app.editor.visual_len(wrap_w);
+    let vis = text_h as usize;
+    if total > vis && vis > 0 {
+        paint_scrollbar(
+            frame,
+            text_area,
+            app.editor.visual_origin(wrap_w),
+            total,
+            app.theme.scrollbar,
+            app.theme.scrollbar_hover,
+            app.theme.body_background,
+        );
+    }
 
     if cmd {
         let prefix = if app.editor.mode == Mode::Search {

@@ -286,6 +286,49 @@ fn tree_lists_vault_dirs_hides_gitignore() {
 }
 
 #[test]
+fn tree_starts_collapsed_on_open() {
+    let (_dir, app) = vault_app();
+    let names: Vec<_> = app.tree.visible().iter().map(|r| r.name.clone()).collect();
+    assert!(names.iter().any(|n| n == "notes/"), "{names:?}");
+    assert!(names.iter().any(|n| n == "assets/"), "{names:?}");
+    assert!(
+        !names
+            .iter()
+            .any(|n| n == "hello.md" || n == "daily/" || n == "projects/"),
+        "nested rows should be hidden until a folder is expanded: {names:?}"
+    );
+    assert!(app.tree.collapsed.contains(std::path::Path::new("notes")));
+    assert!(app
+        .tree
+        .collapsed
+        .contains(std::path::Path::new("notes/daily")));
+    assert!(app.tree.collapsed.contains(std::path::Path::new("assets")));
+}
+
+#[test]
+fn tree_reload_keeps_open_folders_and_collapses_new_ones() {
+    let (dir, mut app) = vault_app();
+    app.tree.collapsed.remove(std::path::Path::new("notes"));
+    let root = dir.path().join("notes");
+    std::fs::create_dir_all(root.join("notes/archive/old")).unwrap();
+    std::fs::write(root.join("notes/archive/old/x.md"), "x\n").unwrap();
+    app.reload_tree();
+    let names: Vec<_> = app.tree.visible().iter().map(|r| r.name.clone()).collect();
+    assert!(
+        names.iter().any(|n| n == "hello.md"),
+        "notes/ should stay expanded: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "archive/"),
+        "new sibling dir should appear under the open folder: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "old/" || n == "x.md"),
+        "new folders should start collapsed: {names:?}"
+    );
+}
+
+#[test]
 fn tree_jk_and_enter_opens_file() {
     let (_dir, mut app) = vault_app();
     let names: Vec<String> = app.tree.visible().into_iter().map(|r| r.name).collect();
@@ -1030,6 +1073,27 @@ fn paste_image_writes_asset_and_markdown() {
 }
 
 #[test]
+fn mermaid_flowchart_draws_in_preview() {
+    let (_dir, mut app) = vault_app();
+    let root = app.vault.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("notes/hello.md"),
+        "```mermaid\nflowchart LR\n  Open --> Preview\n```\n",
+    )
+    .unwrap();
+    app.load_note(std::path::PathBuf::from("notes/hello.md"));
+    let text = buffer_text(&mut app, 120, 28);
+    assert!(
+        text.contains('┌') && text.contains("Open"),
+        "flowchart should draw boxes:\n{text}"
+    );
+    assert!(
+        text.contains("Preview") && (text.contains('►') || text.contains('─')),
+        "flowchart should show the edge:\n{text}"
+    );
+}
+
+#[test]
 fn paste_image_without_note_toasts() {
     let (_dir, mut app) = vault_app();
     app.paste_image_rgba(1, 1, &[255, 0, 0, 255]);
@@ -1143,6 +1207,66 @@ fn notes_panel_wrap_can_be_disabled() {
         "wrap = false should clip the notes pane:\n{pane}"
     );
     assert_eq!(app.editor.scroll_off, 0);
+}
+
+#[test]
+fn notes_panel_shows_scrollbar_when_content_overflows() {
+    let (_dir, mut app) = vault_app();
+    let root = app.vault.as_ref().unwrap().root.clone();
+    let body: String = (1..=80).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(root.join("notes/hello.md"), &body).unwrap();
+    app.load_note(std::path::PathBuf::from("notes/hello.md"));
+
+    let text = buffer_text(&mut app, 100, 24);
+    let pane = editor_pane(&text, app.editor_inner);
+    let last_col: String = pane
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.chars().last().unwrap_or(' '))
+        .collect();
+    assert!(
+        last_col.contains('│') || last_col.contains('█'),
+        "notes pane should paint a scrollbar in the last column:\n{pane}"
+    );
+}
+
+#[test]
+fn notes_mouse_scroll_can_pass_caret() {
+    let (_dir, mut app) = vault_app();
+    let root = app.vault.as_ref().unwrap().root.clone();
+    let body: String = (1..=80).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(root.join("notes/hello.md"), &body).unwrap();
+    app.load_note(std::path::PathBuf::from("notes/hello.md"));
+    let _ = buffer_text(&mut app, 100, 24);
+    assert_eq!(app.editor.cursor_line_col().0, 0);
+    assert_eq!(app.editor.scroll, 0);
+
+    let area = app.editor_area;
+    for _ in 0..5 {
+        app.handle_event(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: area.x + 2,
+            row: area.y + 2,
+            modifiers: KeyModifiers::NONE,
+        }))
+        .expect("wheel");
+    }
+    let _ = buffer_text(&mut app, 100, 24);
+    assert!(
+        app.editor.scroll >= 3,
+        "wheel should pan past the caret: scroll {}",
+        app.editor.scroll
+    );
+    assert_eq!(app.editor.cursor_line_col().0, 0);
+
+    send_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+    let _ = buffer_text(&mut app, 100, 24);
+    assert_eq!(app.editor.cursor_line_col().0, 1);
+    assert!(
+        app.editor.scroll <= app.editor.cursor_line_col().0,
+        "hjkl should bring the caret back on screen: scroll {}",
+        app.editor.scroll
+    );
 }
 
 #[test]
@@ -1431,6 +1555,11 @@ fn session_restores_note_caret_and_zen() {
     assert_eq!(app2.editor.cursor(), 3);
     assert!(app2.zen);
     assert_eq!(app2.pane, Pane::Editor);
+    assert!(
+        !app2.tree.collapsed.contains(std::path::Path::new("notes")),
+        "session restore reveals the open note"
+    );
+    assert!(app2.tree.visible().iter().any(|r| r.name == "hello.md"));
 }
 
 #[test]

@@ -39,6 +39,7 @@ pub(crate) struct PreviewCache {
     pub src: String,
     pub max_w: u16,
     pub max_rows: u16,
+    pub max_diagram_rows: u16,
     pub pal: PreviewPalette,
     pub epoch: u64,
     pub text: Text<'static>,

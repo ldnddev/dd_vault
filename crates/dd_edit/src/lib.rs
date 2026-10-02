@@ -104,6 +104,8 @@ pub struct Editor {
     pub scroll: usize,
     /// Visual rows of `scroll`'s buffer line that sit above the viewport.
     pub scroll_off: usize,
+    /// When true, the viewport follows the caret (keyboard / click). Mouse-wheel pan clears it.
+    pub follow_caret: bool,
     undo: Vec<(Rope, usize)>,
     undo_at: usize,
     visual_anchor: Option<usize>,
@@ -139,6 +141,7 @@ impl Editor {
             dirty: false,
             scroll: 0,
             scroll_off: 0,
+            follow_caret: true,
             visual_anchor: None,
             visual_line: false,
             unnamed: Yank::default(),
@@ -206,12 +209,14 @@ impl Editor {
         self.cursor = cursor.min(len);
         self.scroll = scroll.min(self.line_count().saturating_sub(1));
         self.scroll_off = scroll_off;
+        self.follow_caret = true;
         self.sync_col();
     }
 
     pub fn go_line(&mut self, n: usize) {
         let dest = n.saturating_sub(1).min(self.line_count().saturating_sub(1));
         self.cursor = self.line_start(dest);
+        self.follow_caret = true;
         self.sync_col();
     }
 
@@ -252,6 +257,7 @@ impl Editor {
         }
         let insert = self.mode == Mode::Insert;
         self.cursor = self.pos_at(line, col, insert);
+        self.follow_caret = true;
         self.sync_col();
     }
 
@@ -262,6 +268,7 @@ impl Editor {
         self.visual_anchor = Some(self.cursor);
         self.visual_line = linewise;
         self.mode = Mode::Visual;
+        self.follow_caret = true;
         self.sync_col();
     }
 
@@ -270,6 +277,7 @@ impl Editor {
             return;
         }
         self.cursor = self.pos_at(line, col, true);
+        self.follow_caret = true;
         self.sync_col();
     }
 
@@ -313,16 +321,30 @@ impl Editor {
         self.set_origin(origin, width, caret);
     }
 
-    /// Move the viewport by `delta` visual rows, then pull it back so the caret stays visible.
-    pub fn scroll_wrapped(&mut self, delta: isize, height: usize, width: usize) {
+    /// Keep the origin inside the document. Does not move to the caret.
+    pub fn clamp_scroll_wrapped(&mut self, height: usize, width: usize) {
         if height == 0 {
             return;
         }
         let width = Self::view_width(width);
         let caret = self.caret_pos();
-        let origin = (self.origin_flat(width, caret) as isize + delta).max(0) as usize;
+        let max_origin = self.total_rows(width, caret).saturating_sub(height);
+        let origin = self.origin_flat(width, caret).min(max_origin);
         self.set_origin(origin, width, caret);
-        self.ensure_scroll_wrapped(height, width);
+    }
+
+    /// Move the viewport by `delta` visual rows. The caret may leave the screen.
+    pub fn scroll_wrapped(&mut self, delta: isize, height: usize, width: usize) {
+        if height == 0 {
+            return;
+        }
+        self.follow_caret = false;
+        let width = Self::view_width(width);
+        let caret = self.caret_pos();
+        let max_origin = self.total_rows(width, caret).saturating_sub(height);
+        let origin = (self.origin_flat(width, caret) as isize + delta).clamp(0, max_origin as isize)
+            as usize;
+        self.set_origin(origin, width, caret);
     }
 
     /// Map a viewport row and a column inside the text (not the gutter) to a buffer position.
@@ -424,6 +446,18 @@ impl Editor {
         n + row.min(rows.saturating_sub(1))
     }
 
+    /// Wrapped visual rows in the buffer (caret may add a row past a full line).
+    pub fn visual_len(&self, width: usize) -> usize {
+        let width = Self::view_width(width);
+        self.total_rows(width, self.caret_pos())
+    }
+
+    /// Visual row at the top of the viewport.
+    pub fn visual_origin(&self, width: usize) -> usize {
+        let width = Self::view_width(width);
+        self.origin_flat(width, self.caret_pos())
+    }
+
     fn origin_flat(&self, width: usize, caret: (usize, usize)) -> usize {
         let last = self.line_count().saturating_sub(1);
         let scroll = self.scroll.min(last);
@@ -491,6 +525,7 @@ impl Editor {
     }
 
     pub fn handle(&mut self, key: Key) -> Action {
+        self.follow_caret = true;
         match self.mode {
             Mode::Insert => self.handle_insert(key),
             Mode::Normal => self.handle_normal(key),
@@ -1078,6 +1113,7 @@ impl Editor {
         if s.is_empty() {
             return;
         }
+        self.follow_caret = true;
         self.snapshot();
         self.insert_str(s);
     }
