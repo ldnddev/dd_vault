@@ -6,8 +6,8 @@ expression: text
 │Files on disk. Opinions in git.                                                                   │
 └─────────┌Key & Mouse bindings (F1 / Esc to close, j/k or arrows to scroll)─────────────┐─────────┘
 ┌ vault ──│Global                                                                        │─────────┐
-│open a va│                                                                              │         │
-│         │  • F1                Open/close this help                                    │         │
+│<Space>vv│                                                                              │         │
+│to open a│  • F1                Open/close this help                                    │         │
 │         │  • F2                Live theme editor (source, tokens, save local/global)   │         │
 │         │  • Ctrl+Q            Quit                                                    │         │
 │         │  • Tab               Focus tree → editor → preview                           │         │

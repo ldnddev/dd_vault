@@ -25,4 +25,4 @@ expression: text
 │                                                                            ┌ AI off · grok-4.6 ─┐│
 │                                                                            │off  <Space>ai      ││
 └────────────────────────────────────────────────────────────────────────────└────────────────────┘┘
-F1: Help  F2: Theme  j/k: Nav  i: Insert  :w Save  Ctrl+Q: Quit
+F1: Help  F2: Theme  i: Insert  :w: Save  gf: Follow  Ctrl+Q: Quit

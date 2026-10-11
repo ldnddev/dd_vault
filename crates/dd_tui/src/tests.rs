@@ -85,6 +85,94 @@ fn footer_starts_with_f1_help_then_f2_theme() {
 }
 
 #[test]
+fn footer_follows_pane_mode_and_leader() {
+    let mut app = chrome_app();
+    assert_eq!(
+        app.footer_hint(120),
+        "F1: Help  F2: Theme  <Space>vv: Open vault  Ctrl+Q: Quit"
+    );
+    assert_eq!(
+        app.footer_hint(70),
+        "F1:Help  F2:Theme  <Space>vv: Open vault  ^Q:Quit"
+    );
+
+    app.vault = Some(Vault {
+        name: "notes".into(),
+        root: "/tmp/notes".into(),
+        meta_dir: "/tmp/notes/.dd_vault-notes".into(),
+    });
+    assert_eq!(
+        app.footer_hint(120),
+        "F1: Help  F2: Theme  j/k: Move  Enter: Open  a: New  /: Filter  Ctrl+Q: Quit"
+    );
+    assert_eq!(
+        app.footer_hint(60),
+        "F1:Help  F2:Theme  j/k: Move  Enter: Open  a: New  ^Q:Quit"
+    );
+
+    app.pane = Pane::Editor;
+    assert_eq!(
+        app.footer_hint(120),
+        "F1: Help  F2: Theme  i: Insert  :w: Save  gf: Follow  Ctrl+Q: Quit"
+    );
+    app.editor.mode = dd_edit::Mode::Insert;
+    assert_eq!(
+        app.footer_hint(120),
+        "F1: Help  F2: Theme  Esc: Normal  Ctrl+S: Save  [[: Link  Ctrl+Q: Quit"
+    );
+    app.editor.mode = dd_edit::Mode::Visual;
+    assert_eq!(
+        app.footer_hint(120),
+        "F1: Help  F2: Theme  y: Yank  d: Delete  Esc: Normal  Ctrl+Q: Quit"
+    );
+    app.editor.mode = dd_edit::Mode::Command;
+    assert_eq!(
+        app.footer_hint(120),
+        "F1: Help  F2: Theme  Enter: Run  Esc: Cancel  Ctrl+Q: Quit"
+    );
+    app.editor.mode = dd_edit::Mode::Normal;
+    app.pane = Pane::Preview;
+    assert_eq!(
+        app.footer_hint(120),
+        "F1: Help  F2: Theme  j/k: Scroll  g/G: Ends  Click: Follow  Ctrl+Q: Quit"
+    );
+
+    app.leader = Leader::Space;
+    assert_eq!(
+        app.footer_hint(120),
+        "F1: Help  F2: Theme  Space…  p preview  ff files  vv vault  sg search  nd daily  Esc cancel"
+    );
+    let chord = app.footer_hint(70);
+    assert!(chord.starts_with("F1:Help  F2:Theme  Space…"), "{chord}");
+    assert!(chord.ends_with("Esc cancel"), "{chord}");
+    assert!(chord.chars().count() <= 70, "{chord}");
+    assert!(!chord.contains("nd daily"), "{chord}");
+
+    app.leader = Leader::SpaceV;
+    assert_eq!(
+        app.footer_hint(120),
+        "F1: Help  F2: Theme  Space v…  v: vault picker  Esc: cancel"
+    );
+
+    app.leader = Leader::None;
+    app.ai.size = crate::ai::AiSize::Chat;
+    assert_eq!(
+        app.footer_hint(120),
+        "F1: Help  F2: Theme  Enter: Send  Esc: Close  Tab: Cycle  Ctrl+Q: Quit"
+    );
+
+    app.ai.size = crate::ai::AiSize::Collapsed;
+    let drew = app
+        .handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+        )))
+        .expect("space");
+    assert!(drew, "a pending Space chord must redraw the footer");
+    assert_eq!(app.leader, Leader::Space);
+}
+
+#[test]
 fn tab_and_click_move_focus() {
     let mut app = chrome_app();
     assert_eq!(app.pane, Pane::Tree);

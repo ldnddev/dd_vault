@@ -894,45 +894,55 @@ impl App {
     }
 
     pub fn footer_hint(&self, width: u16) -> String {
-        let parts: &[&str] = if self.tree.filtering {
-            if width < 80 {
-                &["Esc:Clear", "Enter:Keep", "type"]
+        if self.tree.filtering {
+            return if width < 80 {
+                "Esc:Clear  Enter:Keep  type".to_string()
             } else {
-                &["/: filter   Esc: clear   Enter: keep   type to filter"]
-            }
-        } else if self.show_help || self.show_theme || self.modal.is_some() {
-            if width < 80 {
-                &["F1:Help", "Esc:Close", "^Q:Quit"]
+                "/: filter   Esc: clear   Enter: keep   type to filter".to_string()
+            };
+        }
+        if self.show_help || self.show_theme || self.modal.is_some() {
+            return if width < 80 {
+                "F1:Help  Esc:Close  ^Q:Quit".to_string()
             } else {
-                &["F1: Help", "Esc: Close", "Ctrl+Q: Quit"]
-            }
-        } else if width < 80 {
-            &["F1:Help", "F2:Theme", "^Q:Quit", ":w", "<Space>ff"]
-        } else if width < 120 {
-            &[
-                "F1: Help",
-                "F2: Theme",
-                "j/k: Nav",
-                "i: Insert",
-                ":w Save",
-                "Ctrl+Q: Quit",
-            ]
+                "F1: Help  Esc: Close  Ctrl+Q: Quit".to_string()
+            };
+        }
+
+        let (f1, f2, quit) = if width < 80 {
+            ("F1:Help", "F2:Theme", "^Q:Quit")
         } else {
-            &[
-                "F1: Help",
-                "F2: Theme",
-                "j/k: Nav",
-                "i: Insert",
-                ":w Save",
-                "<Space>ff Files",
-                "<Space>p Preview",
-                "<Space>vv Vault",
-                "<Space>ai AI",
-                "Ctrl+Q: Quit",
-                "(mouse: click/scroll)",
-            ]
+            ("F1: Help", "F2: Theme", "Ctrl+Q: Quit")
         };
-        parts.join("  ")
+        let left = [f1, f2];
+
+        if self.leader != Leader::None {
+            let (middle, cancel) = leader_footer(self.leader);
+            return fit_footer(width, &left, middle, &[cancel]);
+        }
+        if self.ai.expanded() {
+            let middle: &[&str] = if self.ai.rx.is_some() {
+                &["Esc: Cancel"]
+            } else {
+                &["Enter: Send", "Esc: Close", "Tab: Cycle"]
+            };
+            return fit_footer(width, &left, middle, &[quit]);
+        }
+        if self.vault.is_none() {
+            return fit_footer(width, &left, &["<Space>vv: Open vault"], &[quit]);
+        }
+        let middle: &[&str] = match self.pane {
+            Pane::Tree => &["j/k: Move", "Enter: Open", "a: New", "/: Filter"],
+            Pane::Preview => &["j/k: Scroll", "g/G: Ends", "Click: Follow"],
+            Pane::Editor => match self.editor.mode {
+                dd_edit::Mode::Insert => &["Esc: Normal", "Ctrl+S: Save", "[[: Link"],
+                dd_edit::Mode::Visual => &["y: Yank", "d: Delete", "Esc: Normal"],
+                dd_edit::Mode::Command => &["Enter: Run", "Esc: Cancel"],
+                dd_edit::Mode::Search => &["Enter: Find", "Esc: Cancel"],
+                dd_edit::Mode::Normal => &["i: Insert", ":w: Save", "gf: Follow"],
+            },
+        };
+        fit_footer(width, &left, middle, &[quit])
     }
 
     pub fn is_busy(&self) -> bool {
@@ -947,6 +957,47 @@ impl App {
             return Some("thinking");
         }
         None
+    }
+}
+
+/// One footer row. Drops context tokens from the right when `width` is tight.
+/// `left` and `right` stay, so F1, F2, and quit (or Esc on a chord) remain.
+fn fit_footer(width: u16, left: &[&str], middle: &[&str], right: &[&str]) -> String {
+    let limit = width as usize;
+    let mut mid: Vec<&str> = middle.to_vec();
+    loop {
+        let mut parts = Vec::with_capacity(left.len() + mid.len() + right.len());
+        parts.extend_from_slice(left);
+        parts.extend(mid.iter().copied());
+        parts.extend_from_slice(right);
+        let line = parts.join("  ");
+        if line.chars().count() <= limit || mid.is_empty() {
+            return line;
+        }
+        mid.pop();
+    }
+}
+
+fn leader_footer(leader: Leader) -> (&'static [&'static str], &'static str) {
+    match leader {
+        Leader::None => (&[], "Esc cancel"),
+        Leader::Space => (
+            &[
+                "Space…",
+                "p preview",
+                "ff files",
+                "vv vault",
+                "sg search",
+                "nd daily",
+            ],
+            "Esc cancel",
+        ),
+        Leader::SpaceV => (&["Space v…", "v: vault picker"], "Esc: cancel"),
+        Leader::SpaceF => (&["Space f…", "f: file finder"], "Esc: cancel"),
+        Leader::SpaceS => (&["Space s…", "g: search notes"], "Esc: cancel"),
+        Leader::SpaceT => (&["Space t…", "g: tag search"], "Esc: cancel"),
+        Leader::SpaceN => (&["Space n…", "d: today's note"], "Esc: cancel"),
+        Leader::SpaceA => (&["Space a…", "i: AI card"], "Esc: cancel"),
     }
 }
 

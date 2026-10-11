@@ -313,13 +313,12 @@ fn render_body(frame: &mut Frame, app: &mut App, area: Rect) {
         let height = inner.height as usize;
         app.tree.ensure_visible(height);
         if app.vault.is_none() {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "open a vault to begin",
-                    Style::default().fg(app.theme.text_secondary),
-                ))),
-                inner,
-            );
+            let hint_style = Style::default().fg(app.theme.text_secondary);
+            let lines: Vec<Line> = empty_vault_hint(inner.width)
+                .into_iter()
+                .map(|text| Line::from(Span::styled(text, hint_style)))
+                .collect();
+            frame.render_widget(Paragraph::new(lines), inner);
         } else {
             let rows = app.tree.visible();
             render_tree_rows(frame, app, inner, &rows);
@@ -1153,6 +1152,14 @@ fn with_cursor(
         }
     }
     out
+}
+
+fn empty_vault_hint(inner_width: u16) -> Vec<&'static str> {
+    if inner_width >= 15 {
+        vec!["<Space>vv", "to open a vault"]
+    } else {
+        vec!["<Space>vv"]
+    }
 }
 
 fn tree_title(app: &App, count: usize) -> String {

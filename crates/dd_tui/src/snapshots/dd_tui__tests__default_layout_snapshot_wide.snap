@@ -6,8 +6,8 @@ expression: text
 │Files on disk. Opinions in git.                                                                   │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ vault ────────────────┐┌ (no note) — NORMAL ─────────────────────────────────────────────────────┐
-│open a vault to begin  ││open a note from the tree                                                │
-│                       ││                                                                         │
+│<Space>vv              ││open a note from the tree                                                │
+│to open a vault        ││                                                                         │
 │                       ││                                                                         │
 │                       ││                                                                         │
 │                       ││                                                                         │
@@ -25,4 +25,4 @@ expression: text
 │                       ││                                                   ┌ AI off · grok-4.6 ─┐│
 │                       ││                                                   │off  <Space>ai      ││
 └───────────────────────┘└───────────────────────────────────────────────────└────────────────────┘┘
-F1: Help  F2: Theme  j/k: Nav  i: Insert  :w Save  Ctrl+Q: Quit
+F1: Help  F2: Theme  <Space>vv: Open vault  Ctrl+Q: Quit
