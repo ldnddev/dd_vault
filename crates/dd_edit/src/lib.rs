@@ -1,7 +1,24 @@
 //! ropey buffer + vim-flavored mode layer.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const O_NOFOLLOW: i32 = 0x20000;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const O_NOFOLLOW: i32 = 0x0100;
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    ))
+))]
+const O_NOFOLLOW: i32 = 0;
 
 use ropey::Rope;
 
@@ -12,6 +29,33 @@ pub use error::Error;
 pub use keys::Key;
 
 const MAX_OPEN_BYTES: u64 = 2_000_000;
+
+fn read_nofollow_string(path: &Path) -> Result<String, Error> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(O_NOFOLLOW);
+    }
+    let file = opts.open(path)?;
+    let mut buf = String::new();
+    file.take(MAX_OPEN_BYTES).read_to_string(&mut buf)?;
+    Ok(buf)
+}
+
+fn write_nofollow(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(O_NOFOLLOW);
+    }
+    let mut file = opts.open(path)?;
+    file.write_all(bytes)?;
+    Ok(())
+}
 
 /// Char index where each visual row of `line` starts.
 ///
@@ -244,11 +288,17 @@ impl Editor {
     }
 
     pub fn open(path: PathBuf, rel: String) -> Result<Self, Error> {
-        let meta = std::fs::metadata(&path)?;
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.file_type().is_symlink() {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "refusing to open a symlink",
+            )));
+        }
         if meta.len() > MAX_OPEN_BYTES {
             return Err(Error::TooLarge(path));
         }
-        let text = std::fs::read_to_string(&path)?;
+        let text = read_nofollow_string(&path)?;
         let mut ed = Self::empty();
         ed.rope = Rope::from_str(&text);
         ed.path = Some(path);
@@ -615,7 +665,7 @@ impl Editor {
         let Some(path) = &self.path else {
             return Err(Error::NoPath);
         };
-        std::fs::write(path, self.text())?;
+        write_nofollow(path, self.text().as_bytes())?;
         Ok(())
     }
 

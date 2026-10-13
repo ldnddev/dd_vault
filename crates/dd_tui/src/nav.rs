@@ -169,26 +169,26 @@ impl App {
             return;
         };
         self.modal = None;
-        if !vault.root.join(&rel).exists() {
-            match dd_vault_core::create_file(&vault.root, &rel) {
-                Ok(abs) => {
-                    let title = rel
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("Untitled");
-                    if let Err(err) = std::fs::write(&abs, format!("# {title}\n")) {
-                        self.push_toast(ToastLevel::Error, err.to_string());
-                        return;
-                    }
-                    self.reload_tree();
-                    self.refresh_git();
-                    self.queue_reindex();
-                }
-                Err(err) => {
-                    self.push_toast(ToastLevel::Error, err.to_string());
-                    return;
-                }
+        let existing = match dd_vault_core::confined_path(&vault.root, &rel) {
+            Ok(path) => path.is_file(),
+            Err(err) => {
+                self.push_toast(ToastLevel::Error, err.to_string());
+                return;
             }
+        };
+        if !existing {
+            let title = rel
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Untitled");
+            let body = format!("# {title}\n");
+            if let Err(err) = dd_vault_core::write_vault_file(&vault.root, &rel, body.as_bytes()) {
+                self.push_toast(ToastLevel::Error, err.to_string());
+                return;
+            }
+            self.reload_tree();
+            self.refresh_git();
+            self.queue_reindex();
         }
         self.navigate(NavigateTo {
             rel,
@@ -430,9 +430,12 @@ impl App {
         self.focus = session.focus;
         self.explore = session.explore;
         if let Some(rel) = session.note {
-            let path = vault.root.join(&rel);
-            if path.is_file() {
-                self.load_note(PathBuf::from(&rel));
+            let rel_path = PathBuf::from(&rel);
+            let inside = dd_vault_core::confined_path(&vault.root, &rel_path)
+                .ok()
+                .is_some_and(|path| path.is_file());
+            if inside {
+                self.load_note(rel_path);
                 self.editor
                     .restore_view(session.cursor, session.scroll, session.scroll_off);
                 self.tree.reveal(Path::new(&rel));

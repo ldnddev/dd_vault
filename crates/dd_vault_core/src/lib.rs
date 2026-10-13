@@ -19,8 +19,9 @@ pub use config::VaultConfig;
 pub use daily::{daily_rel, ensure_daily, today_ymd};
 pub use error::Error;
 pub use fs_ops::{
-    create_dir, create_file, delete_entry, rel_from_root, rename_entry, resolve_inside,
-    validate_entry_name, wikilink_new_rel,
+    confined_path, create_dir, create_file, delete_entry, read_prefix_nofollow, read_vault_bytes,
+    read_vault_text, rel_from_root, rename_entry, resolve_inside, symlink_target_escapes,
+    validate_entry_name, vault_entry, wikilink_new_rel, write_vault_file,
 };
 pub use git::{
     commit, load_secret_patterns, pull, push, status, usable_credentials, GitCtx, GitOpResult,

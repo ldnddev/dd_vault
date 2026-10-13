@@ -7,6 +7,7 @@ use std::time::UNIX_EPOCH;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
+use crate::fs_ops::{confined_path, read_prefix_nofollow};
 use crate::parse::{parse_note, LinkKind, ParsedNote};
 use crate::skip::skip_entry_name;
 use crate::{Error, Vault};
@@ -148,10 +149,12 @@ impl Index {
             )?;
             let file_id = idx.conn.last_insert_rowid();
             if kind == "note" && f.size <= FTS_MAX_BYTES {
-                if let Ok(src) = fs::read_to_string(&f.abs) {
-                    let parsed = parse_note(&f.rel, &src);
-                    idx.insert_note(file_id, &parsed)?;
-                    report.notes_indexed += 1;
+                if let Ok(bytes) = read_prefix_nofollow(&f.abs, FTS_MAX_BYTES) {
+                    if let Ok(src) = String::from_utf8(bytes) {
+                        let parsed = parse_note(&f.rel, &src);
+                        idx.insert_note(file_id, &parsed)?;
+                        report.notes_indexed += 1;
+                    }
                 }
             }
         }
@@ -426,7 +429,21 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<Walked>) -> Result<(), E
             collect_files(root, &path, out)?;
             continue;
         }
-        let meta = entry.metadata()?;
+        let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        let abs = if ft.is_symlink() {
+            match confined_path(root, &rel) {
+                Ok(canon) if canon.is_file() => canon,
+                _ => continue,
+            }
+        } else {
+            path
+        };
+        let Ok(meta) = fs::symlink_metadata(&abs) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
         let size = meta.len();
         let mtime = meta
             .modified()
@@ -434,11 +451,10 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<Walked>) -> Result<(), E
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let hash = hash_file(&path, size)?;
-        let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        let hash = hash_file(&abs, size)?;
         out.push(Walked {
             rel,
-            abs: path,
+            abs,
             size,
             mtime,
             hash,
@@ -451,7 +467,11 @@ fn hash_file(path: &Path, size: u64) -> Result<String, Error> {
     if size > FTS_MAX_BYTES {
         return Ok(format!("size:{size}"));
     }
-    let bytes = fs::read(path)?;
+    let bytes = match read_prefix_nofollow(path, FTS_MAX_BYTES) {
+        Ok(bytes) => bytes,
+        Err(Error::OutsideVault(_)) => return Ok(format!("size:{size}")),
+        Err(err) => return Err(err),
+    };
     let mut h = Sha256::new();
     h.update(&bytes);
     Ok(hex::encode(h.finalize()))

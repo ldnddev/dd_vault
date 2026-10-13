@@ -590,7 +590,17 @@ impl App {
         let Some(vault) = &self.vault else {
             return;
         };
-        let abs = vault.root.join(&rel);
+        let abs = match dd_vault_core::confined_path(&vault.root, &rel) {
+            Ok(path) => path,
+            Err(err) => {
+                self.push_toast(ToastLevel::Error, err.to_string());
+                return;
+            }
+        };
+        if !abs.is_file() {
+            self.push_toast(ToastLevel::Error, format!("not a file: {}", rel.display()));
+            return;
+        }
         match Editor::open(abs, rel.to_string_lossy().into_owned()) {
             Ok(ed) => {
                 self.editor = ed;
@@ -607,11 +617,24 @@ impl App {
     }
 
     pub fn save_note(&mut self) {
-        match self.editor.save_to_disk() {
-            Ok(()) => {
+        let Some(vault) = &self.vault else {
+            self.push_toast(ToastLevel::Error, "No vault open");
+            return;
+        };
+        let Some(rel) = self.editor.rel.clone() else {
+            self.push_toast(ToastLevel::Error, "No file name");
+            return;
+        };
+        let text = self.editor.text();
+        match dd_vault_core::write_vault_file(
+            &vault.root,
+            std::path::Path::new(&rel),
+            text.as_bytes(),
+        ) {
+            Ok(path) => {
+                self.editor.path = Some(path);
                 self.editor.mark_saved();
-                let name = self.editor.rel.as_deref().unwrap_or("file");
-                self.push_toast(ToastLevel::Success, format!("Saved {name}"));
+                self.push_toast(ToastLevel::Success, format!("Saved {rel}"));
                 self.refresh_git();
             }
             Err(err) => self.push_toast(ToastLevel::Error, err.to_string()),

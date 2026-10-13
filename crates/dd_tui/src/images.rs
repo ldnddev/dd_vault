@@ -49,14 +49,7 @@ impl App {
         };
         let stem = note_stem(self.editor.rel.as_deref());
         let rel = unique_asset_rel(&vault.root, &stem);
-        let abs = vault.root.join(&rel);
-        if let Some(parent) = abs.parent() {
-            if let Err(err) = std::fs::create_dir_all(parent) {
-                self.push_toast(ToastLevel::Error, err.to_string());
-                return;
-            }
-        }
-        if let Err(err) = std::fs::write(&abs, png) {
+        if let Err(err) = dd_vault_core::write_vault_file(&vault.root, &rel, &png) {
             self.push_toast(ToastLevel::Error, err.to_string());
             return;
         }

@@ -522,6 +522,54 @@ fn tree_filter_narrows_rows() {
 }
 
 #[test]
+fn load_note_rejects_paths_outside_the_vault() {
+    let (dir, mut app) = vault_app();
+    let outside = dir.path().join("secret.md");
+    std::fs::write(&outside, "SECRET\n").unwrap();
+    app.load_note(std::path::PathBuf::from("../secret.md"));
+    assert!(!app.editor.text().contains("SECRET"));
+    assert_ne!(app.editor.rel.as_deref(), Some("../secret.md"));
+    assert!(
+        app.toasts
+            .iter()
+            .any(|t| t.message.contains("invalid") || t.message.contains("escapes")),
+        "{:?}",
+        app.toasts
+            .iter()
+            .map(|t| t.message.clone())
+            .collect::<Vec<_>>()
+    );
+
+    #[cfg(unix)]
+    {
+        let root = app.vault.as_ref().unwrap().root.clone();
+        std::os::unix::fs::symlink(&outside, root.join("notes/leak.md")).unwrap();
+        app.toasts.clear();
+        app.load_note(std::path::PathBuf::from("notes/leak.md"));
+        assert!(!app.editor.text().contains("SECRET"));
+        assert!(
+            app.toasts.iter().any(|t| t.message.contains("escapes")),
+            "{:?}",
+            app.toasts
+                .iter()
+                .map(|t| t.message.clone())
+                .collect::<Vec<_>>()
+        );
+        std::fs::write(outside, "STILL\n").unwrap();
+        let err = dd_vault_core::write_vault_file(
+            &root,
+            std::path::Path::new("notes/leak.md"),
+            b"pwned\n",
+        );
+        assert!(err.is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("secret.md")).unwrap(),
+            "STILL\n"
+        );
+    }
+}
+
+#[test]
 fn editor_opens_and_edits_file() {
     let (dir, mut app) = vault_app();
     let _ = dir;

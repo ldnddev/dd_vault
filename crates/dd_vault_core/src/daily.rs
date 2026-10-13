@@ -1,10 +1,10 @@
 //! Daily notes: `notes/daily/YYYY-MM-DD.md` (path overridable).
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::fs_ops::{confined_path, write_vault_file};
 use crate::Error;
 
 pub fn today_ymd() -> String {
@@ -52,15 +52,12 @@ pub fn ensure_daily(root: &Path, daily_dir: &str, ymd: &str) -> Result<PathBuf, 
     {
         return Err(Error::InvalidEntryName(rel.display().to_string()));
     }
-    let abs = root.join(&rel);
+    let abs = confined_path(root, &rel)?;
     if abs.is_file() {
         return Ok(rel);
     }
-    if let Some(parent) = abs.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let body = format!("---\ntitle: {ymd}\ndate: {ymd}\n---\n\n# {ymd}\n\n");
-    fs::write(&abs, body)?;
+    write_vault_file(root, &rel, body.as_bytes())?;
     Ok(rel)
 }
 
@@ -68,6 +65,7 @@ pub fn ensure_daily(root: &Path, daily_dir: &str, ymd: &str) -> Result<PathBuf, 
 mod tests {
     use super::*;
     use crate::init;
+    use std::fs;
 
     #[test]
     fn ensure_daily_creates_once() {
