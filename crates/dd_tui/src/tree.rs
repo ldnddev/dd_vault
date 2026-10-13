@@ -426,11 +426,12 @@ impl App {
                         let new_rel = dest
                             .strip_prefix(&vault.root)
                             .map(Path::to_path_buf)
-                            .unwrap_or(dest);
+                            .unwrap_or_else(|_| PathBuf::from(name));
                         let old = rel.to_string_lossy();
                         if self.editor.rel.as_deref() == Some(old.as_ref()) {
-                            let abs = vault.root.join(&new_rel);
-                            self.editor.path = Some(abs);
+                            if let Ok(abs) = dd_vault_core::confined_path(&vault.root, &new_rel) {
+                                self.editor.path = Some(abs);
+                            }
                             self.editor.rel = Some(new_rel.to_string_lossy().into_owned());
                         }
                         self.modal = None;
@@ -500,14 +501,19 @@ impl App {
             ConfirmKind::ReloadDisk { rel } => {
                 self.modal = None;
                 self.suppress_disk_prompt = None;
-                let abs = vault.root.join(&rel);
-                if !abs.is_file() {
+                let opened = dd_vault_core::confined_path(&vault.root, &rel)
+                    .ok()
+                    .filter(|path| path.is_file());
+                let Some(abs) = opened else {
                     self.editor = dd_edit::Editor::empty();
                     self.push_toast(
                         ToastLevel::Warning,
                         format!("{} is gone from disk", rel.display()),
                     );
-                } else if self.editor.rel.as_deref() == Some(rel.to_string_lossy().as_ref()) {
+                    return;
+                };
+                if self.editor.rel.as_deref() == Some(rel.to_string_lossy().as_ref()) {
+                    self.editor.path = Some(abs);
                     match self.editor.reload_from_disk() {
                         Ok(()) => {
                             self.push_toast(ToastLevel::Info, format!("Reloaded {}", rel.display()))

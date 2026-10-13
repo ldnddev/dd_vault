@@ -176,8 +176,14 @@ impl App {
         if self.suppress_disk_prompt.as_ref().is_some_and(|s| s == rel) {
             return;
         }
-        let abs = root.join(rel);
-        if !abs.is_file() {
+        let inside = match dd_vault_core::confined_path(root, rel) {
+            Ok(path) => path,
+            Err(err) => {
+                self.push_toast(ToastLevel::Warning, err.to_string());
+                return;
+            }
+        };
+        if !inside.is_file() {
             if self.editor.dirty {
                 self.prompt_disk_change(rel.to_path_buf());
             } else {
@@ -189,7 +195,7 @@ impl App {
             }
             return;
         }
-        let disk = match std::fs::read_to_string(&abs) {
+        let disk = match dd_vault_core::read_vault_text(root, rel, 2_000_000) {
             Ok(s) => s,
             Err(err) => {
                 self.push_toast(ToastLevel::Warning, format!("Watch read failed: {err}"));
