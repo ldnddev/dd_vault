@@ -17,7 +17,15 @@ pub fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, 
 }
 
 pub fn decode_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), Error> {
-    let img = image::load_from_memory(bytes)?.to_rgba8();
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8_192);
+    limits.max_image_height = Some(8_192);
+    limits.max_alloc = Some(32 * 1024 * 1024);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(image::ImageError::IoError)?;
+    reader.limits(limits);
+    let img = reader.decode()?.to_rgba8();
     Ok((img.width(), img.height(), img.into_raw()))
 }
 
