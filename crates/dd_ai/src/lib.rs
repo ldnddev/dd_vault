@@ -359,6 +359,77 @@ impl AiSettings {
             .trim_end_matches('/')
             .to_string()
     }
+
+    /// Base URL that is safe to send a note and API key to.
+    ///
+    /// Network providers must be `https`. Ollama must stay on loopback so a
+    /// `base_url` in config cannot redirect a "local" request off the machine.
+    pub fn checked_base(&self) -> Result<String, Error> {
+        let base = self.resolved_base();
+        let url = reqwest::Url::parse(&base)
+            .map_err(|err| Error::Msg(format!("AI base URL is not a URL: {err}")))?;
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(Error::Msg(
+                "AI base URL must not contain a username or password".into(),
+            ));
+        }
+        let host = url.host_str().unwrap_or("");
+        let local_http = self.provider == "ollama";
+        if local_http {
+            if url.scheme() != "http" && url.scheme() != "https" {
+                return Err(Error::Msg(
+                    "Ollama base URL must be http or https on loopback".into(),
+                ));
+            }
+            if !is_loopback(host) {
+                return Err(Error::Msg(format!(
+                    "Ollama base URL must be loopback (got {host})"
+                )));
+            }
+        } else if url.scheme() != "https" {
+            return Err(Error::Msg("network AI base URL must use https".into()));
+        }
+        Ok(base)
+    }
+}
+
+fn is_loopback(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn tighten_file(path: &Path) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+fn open_private(path: &Path, append: bool) -> Result<std::fs::File, Error> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    if path.exists() {
+        tighten_file(path)?;
+    }
+    let mut opts = fs::OpenOptions::new();
+    opts.create(true);
+    if append {
+        opts.append(true);
+    } else {
+        opts.write(true).truncate(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(path)?;
+    tighten_file(path)?;
+    Ok(file)
 }
 
 fn keys_mode_ok(path: &Path) -> Result<(), Error> {
@@ -412,14 +483,8 @@ fn write_key(path: &Path, provider: &str, key: &str) -> Result<(), Error> {
         map.insert(provider.to_string(), key.to_string());
     }
     let body = toml::to_string_pretty(&map).map_err(|e| Error::Msg(e.to_string()))?;
-    fs::write(path, body)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(path)?.permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(path, perms)?;
-    }
+    let mut file = open_private(path, false)?;
+    file.write_all(body.as_bytes())?;
     Ok(())
 }
 
@@ -441,7 +506,15 @@ pub fn resolve_api_key(settings: &AiSettings) -> Result<String, Error> {
 
 pub fn redact(s: &str) -> String {
     let mut out = s.to_string();
-    for needle in ["ghp_", "github_pat_", "AKIA", "sk-", "xai-", "Bearer "] {
+    for needle in [
+        "ghp_",
+        "github_pat_",
+        "AKIA",
+        "sk-",
+        "xai-",
+        "Bearer ",
+        "-----BEGIN ",
+    ] {
         while let Some(i) = out.find(needle) {
             let rest = &out[i + needle.len()..];
             let n = rest
@@ -456,15 +529,12 @@ pub fn redact(s: &str) -> String {
 }
 
 pub fn append_log(path: &Path, rec: &serde_json::Value) {
-    if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
-    }
     let line = serde_json::to_string(rec).unwrap_or_else(|_| "{}".into());
-    let mut f = match fs::OpenOptions::new().create(true).append(true).open(path) {
-        Ok(f) => f,
+    let mut file = match open_private(path, true) {
+        Ok(file) => file,
         Err(_) => return,
     };
-    let _ = writeln!(f, "{line}");
+    let _ = writeln!(file, "{line}");
 }
 
 pub fn parse_sse_line(line: &str) -> Option<Result<Delta, Error>> {
@@ -543,7 +613,8 @@ fn run_http(
     tx: &mpsc::Sender<Result<Delta, Error>>,
 ) -> Result<(), Error> {
     let key = resolve_api_key(settings)?;
-    let url = format!("{}/chat/completions", settings.resolved_base());
+    let base = settings.checked_base()?;
+    let url = format!("{base}/chat/completions");
     let body = serde_json::json!({
         "model": req.model,
         "stream": true,
@@ -554,6 +625,19 @@ fn run_http(
     });
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(180))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 3 {
+                return attempt.error(std::io::Error::other("too many AI redirects"));
+            }
+            if let Some(prev) = attempt.previous().last() {
+                let next = attempt.url();
+                if prev.scheme() != next.scheme() || prev.host_str() != next.host_str() {
+                    return attempt
+                        .error(std::io::Error::other("AI redirect left the original host"));
+                }
+            }
+            attempt.follow()
+        }))
         .build()
         .map_err(|e| Error::Msg(e.to_string()))?;
     let mut req_builder = client
@@ -582,6 +666,7 @@ fn run_http(
     if !resp.status().is_success() {
         let status = resp.status();
         let t = resp.text().unwrap_or_default();
+        let t: String = redact(&t).chars().take(300).collect();
         return Err(Error::Msg(format!("HTTP {status}: {t}")));
     }
     let mut buf = String::new();
@@ -835,5 +920,37 @@ mod tests {
             Some("sk-or-v1-testsecret")
         );
         assert!(s.has_api_key());
+    }
+
+    #[test]
+    fn checked_base_pins_https_and_loopback() {
+        let mut s = AiSettings::default();
+        assert_eq!(s.checked_base().unwrap(), SPACEXAI_BASE);
+        s.base_url = "http://api.x.ai/v1".into();
+        assert!(s.checked_base().is_err());
+        s.base_url = "https://user:secret@api.x.ai/v1".into();
+        assert!(s.checked_base().is_err());
+        s.apply_provider("ollama").unwrap();
+        assert_eq!(s.checked_base().unwrap(), OLLAMA_BASE);
+        s.base_url = "http://127.0.0.1:11434/v1".into();
+        assert!(s.checked_base().is_ok());
+        s.base_url = "http://evil.example/v1".into();
+        let err = s.checked_base().unwrap_err();
+        assert!(err.to_string().contains("loopback"), "{err}");
+    }
+
+    #[test]
+    fn ai_log_is_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs").join("ai.jsonl");
+        append_log(&path, &serde_json::json!({"prompt": "hello"}));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "ai.jsonl must be 0600");
+        }
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("hello"), "{text}");
     }
 }
