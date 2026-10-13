@@ -1,19 +1,23 @@
 //! Git via the `git` CLI: status, pull/push/commit, secret scan, 3-tier conflicts.
 
+use std::collections::HashSet;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::VaultConfig;
+use crate::fs_ops::{read_prefix_nofollow, symlink_target_escapes, vault_entry};
 use crate::paths::{is_metadata_dirname, Paths};
 use crate::skip::{skip_dir_name, skip_file_name};
 use crate::vault::{Vault, GITIGNORE};
 use crate::Error;
 
 /// Built-in pre-commit needles. Extra patterns come from config.
-pub const BUILTIN_SECRET_NEEDLES: &[&str] = &["ghp_", "github_pat_", "AKIA"];
+pub const BUILTIN_SECRET_NEEDLES: &[&str] =
+    &["ghp_", "github_pat_", "AKIA", "sk-", "xai-", "-----BEGIN "];
 
 const SCAN_CAP: usize = 5 * 1024 * 1024;
 
@@ -103,6 +107,15 @@ pub struct GitCtx<'a> {
 pub fn usable_credentials(path: &Path) -> Result<Option<PathBuf>, Error> {
     if !path.is_file() {
         return Ok(None);
+    }
+    if path
+        .to_string_lossy()
+        .chars()
+        .any(|c| c == '\n' || c == '\r' || c == '\0')
+    {
+        return Err(Error::Git(
+            "credentials path contains a newline; refusing to pass it to git".into(),
+        ));
     }
     #[cfg(unix)]
     {
@@ -399,40 +412,43 @@ fn resolve_unmerged(root: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), Error> 
 }
 
 fn try_merge_file(ours: &[u8], base: &[u8], theirs: &[u8]) -> Option<String> {
-    let stamp = unix_ts();
-    let pid = std::process::id();
-    let dir = std::env::temp_dir();
-    let ours_p = dir.join(format!("dd_vault-ours-{stamp}-{pid}"));
-    let base_p = dir.join(format!("dd_vault-base-{stamp}-{pid}"));
-    let theirs_p = dir.join(format!("dd_vault-theirs-{stamp}-{pid}"));
-    let write = |p: &Path, b: &[u8]| fs::write(p, b).ok();
-    if write(&ours_p, ours).is_none()
-        || write(&base_p, base).is_none()
-        || write(&theirs_p, theirs).is_none()
-    {
-        let _ = fs::remove_file(&ours_p);
-        let _ = fs::remove_file(&base_p);
-        let _ = fs::remove_file(&theirs_p);
-        return None;
-    }
+    let dir = tempfile::Builder::new()
+        .prefix("dd_vault-merge-")
+        .tempdir()
+        .ok()?;
+    let ours_p = dir.path().join("ours");
+    let base_p = dir.path().join("base");
+    let theirs_p = dir.path().join("theirs");
+    write_private(&ours_p, ours)?;
+    write_private(&base_p, base)?;
+    write_private(&theirs_p, theirs)?;
     let ours_s = ours_p.to_string_lossy().into_owned();
     let base_s = base_p.to_string_lossy().into_owned();
     let theirs_s = theirs_p.to_string_lossy().into_owned();
-    let cwd = std::env::temp_dir();
     let out = run_git(
-        &cwd,
+        dir.path(),
         &["merge-file", "-p", &ours_s, &base_s, &theirs_s],
         None,
-    );
-    let _ = fs::remove_file(&ours_p);
-    let _ = fs::remove_file(&base_p);
-    let _ = fs::remove_file(&theirs_p);
-    let out = out.ok()?;
+    )
+    .ok()?;
     if out.status.success() {
         String::from_utf8(out.stdout).ok()
     } else {
         None
     }
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> Option<()> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path).ok()?;
+    file.write_all(bytes).ok()?;
+    Some(())
 }
 
 fn write_sidecar(original: &Path, theirs: &[u8], ts: u64) -> Result<PathBuf, Error> {
@@ -486,15 +502,15 @@ fn show_stage(root: &Path, stage: u8, rel: &str) -> Option<Vec<u8>> {
 }
 
 fn unmerged_paths(root: &Path) -> Result<Vec<String>, Error> {
-    let out = run_git(root, &["diff", "--name-only", "--diff-filter=U"], None)?;
+    let out = run_git(
+        root,
+        &["diff", "--name-only", "-z", "--diff-filter=U"],
+        None,
+    )?;
     if !out.status.success() {
         return Err(Error::Git(err_or(&out, "list unmerged failed")));
     }
-    Ok(stdout_lossy(&out)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect())
+    Ok(nul_paths(&out.stdout))
 }
 
 fn skip_git_rel(rel: &str) -> bool {
@@ -549,7 +565,13 @@ fn unstage_skipped(root: &Path, credentials: Option<&Path>) {
 fn scan_staged(root: &Path, extra: &[String]) -> Result<Vec<String>, Error> {
     let out = run_git(
         root,
-        &["diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+        &[
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--diff-filter=ACMR",
+        ],
         None,
     )?;
     if !out.status.success() {
@@ -560,28 +582,53 @@ fn scan_staged(root: &Path, extra: &[String]) -> Result<Vec<String>, Error> {
         needles.push(p.as_str());
     }
     let mut hits = Vec::new();
-    for rel in stdout_lossy(&out).lines().filter(|l| !l.is_empty()) {
-        if skip_git_rel(rel) {
+    for rel in nul_paths(&out.stdout) {
+        if skip_git_rel(&rel) {
             continue;
         }
-        let path = root.join(rel);
-        let Ok(bytes) = fs::read(&path) else {
+        let entry = match vault_entry(root, Path::new(&rel)) {
+            Ok(path) => path,
+            Err(_) => {
+                hits.push(format!("{rel} (path escapes vault)"));
+                continue;
+            }
+        };
+        let meta = match fs::symlink_metadata(&entry) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            match symlink_target_escapes(root, &entry) {
+                Ok(true) | Err(_) => hits.push(format!("{rel} (symlink escapes vault)")),
+                Ok(false) => {}
+            }
             continue;
+        }
+        let bytes = match read_prefix_nofollow(&entry, SCAN_CAP as u64) {
+            Ok(bytes) => bytes,
+            Err(Error::OutsideVault(_)) => {
+                hits.push(format!("{rel} (path escapes vault)"));
+                continue;
+            }
+            Err(_) => continue,
         };
         if is_binary(&bytes) {
             continue;
         }
-        let slice = if bytes.len() > SCAN_CAP {
-            &bytes[..SCAN_CAP]
-        } else {
-            &bytes
-        };
-        let text = String::from_utf8_lossy(slice);
+        let text = String::from_utf8_lossy(&bytes);
         if let Some(needle) = needles.iter().find(|n| text.contains(**n)) {
             hits.push(format!("{rel} ({needle})"));
         }
     }
     Ok(hits)
+}
+
+fn nul_paths(bytes: &[u8]) -> Vec<String> {
+    bytes
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect()
 }
 
 fn parse_porcelain_v2(text: &str) -> GitStatus {
@@ -646,15 +693,16 @@ fn ensure_repo(root: &Path) -> Result<(), Error> {
 fn run_git(root: &Path, args: &[&str], credentials: Option<&Path>) -> Result<Output, Error> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(root);
-    if let Some(path) = credentials {
-        cmd.arg("-c")
-            .arg(format!("credential.helper=store --file={}", path.display()));
+    for arg in harden_args(root, credentials)? {
+        cmd.arg(arg);
     }
     cmd.args(args);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.env("GIT_MERGE_AUTOEDIT", "no");
     cmd.env("GIT_EDITOR", "true");
     cmd.env("GIT_SEQUENCE_EDITOR", "true");
+    cmd.env("GIT_PAGER", "cat");
+    cmd.env("GIT_ASKPASS", "true");
     if std::env::var_os("GIT_SSH_COMMAND").is_none() {
         cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
@@ -665,6 +713,333 @@ fn run_git(root: &Path, args: &[&str], credentials: Option<&Path>) -> Result<Out
             Err(Error::Git("git not found on PATH".into()))
         }
         Err(err) => Err(err.into()),
+    }
+}
+
+/// Command-line config that overrides repo-local execution hooks.
+///
+/// A vault's `.git/config` is attacker-controlled when the folder is shared.
+/// `git status` runs `core.fsmonitor`, `git add` runs clean filters, `git pull`
+/// runs merge drivers and can honor `ext::` remotes, and `git push` runs every
+/// `credential.helper`. Those are cleared or replaced here.
+fn harden_args(root: &Path, credentials: Option<&Path>) -> Result<Vec<String>, Error> {
+    let hooks = empty_hooks_dir()?;
+    let mut args = vec![
+        "-c".into(),
+        "core.fsmonitor=".into(),
+        "-c".into(),
+        "core.fsmonitorHookVersion=".into(),
+        "-c".into(),
+        format!("core.hooksPath={}", hooks.display()),
+        "-c".into(),
+        "protocol.ext.allow=never".into(),
+        "-c".into(),
+        "diff.external=".into(),
+        "-c".into(),
+        "core.gitProxy=".into(),
+        "-c".into(),
+        "core.pager=cat".into(),
+        "-c".into(),
+        "core.askPass=true".into(),
+        "-c".into(),
+        "submodule.recurse=false".into(),
+    ];
+    args.extend(neutralize_repo_commands(root)?);
+    args.push("-c".into());
+    args.push("credential.helper=".into());
+    if let Some(path) = credentials {
+        args.push("-c".into());
+        args.push(format!(
+            "credential.helper=store --file={}",
+            quote_helper_path(&path.display().to_string())
+        ));
+    }
+    Ok(args)
+}
+
+fn quote_helper_path(path: &str) -> String {
+    let mut out = String::from("\"");
+    for c in path.chars() {
+        if c == '\\' || c == '"' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+fn empty_hooks_dir() -> Result<PathBuf, Error> {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(path) = DIR.get() {
+        return Ok(path.clone());
+    }
+    let created = tempfile::Builder::new()
+        .prefix("dd_vault-hooks-")
+        .tempdir()
+        .map_err(|err| Error::Git(format!("cannot create empty hooks dir: {err}")))?;
+    let path = created.path().to_path_buf();
+    std::mem::forget(created);
+    let _ = DIR.set(path.clone());
+    Ok(path)
+}
+
+struct GitKey {
+    top: String,
+    sub: Option<String>,
+    leaf: String,
+    value: String,
+}
+
+impl GitKey {
+    fn full(&self) -> String {
+        match &self.sub {
+            Some(sub) => format!("{}.{}.{}", self.top, sub, self.leaf),
+            None => format!("{}.{}", self.top, self.leaf),
+        }
+    }
+
+    fn safe_override(&self) -> Result<Option<String>, Error> {
+        if !is_command_key(&self.top, &self.leaf) {
+            return Ok(None);
+        }
+        let full = self.full();
+        if !safe_config_key(&full) {
+            return Err(Error::Git(format!(
+                "refusing to run git: unsafe config key {full:?}"
+            )));
+        }
+        if self.top == "credential" {
+            return Ok(None);
+        }
+        let value = if full == "http.sslverify" {
+            if is_git_false(&self.value) {
+                format!("{full}=true")
+            } else {
+                return Ok(None);
+            }
+        } else if self.leaf == "required" {
+            format!("{full}=false")
+        } else if full == "core.pager" {
+            format!("{full}=cat")
+        } else {
+            format!("{full}=")
+        };
+        Ok(Some(value))
+    }
+}
+
+fn is_command_key(top: &str, leaf: &str) -> bool {
+    matches!(
+        (top, leaf),
+        ("filter", "clean" | "smudge" | "process" | "required")
+            | ("diff", "textconv" | "command")
+            | ("merge", "driver")
+            | ("core", "pager" | "askpass")
+            | ("http", "proxy" | "sslverify")
+            | ("gpg", "program")
+    )
+}
+
+fn safe_config_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 200
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+fn is_git_false(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "false" | "no" | "0" | "off"
+    )
+}
+
+fn neutralize_repo_commands(root: &Path) -> Result<Vec<String>, Error> {
+    let Some(config) = repo_config_path(root) else {
+        return Ok(Vec::new());
+    };
+    let mut keys = Vec::new();
+    let mut seen = HashSet::new();
+    collect_git_keys(&config, 0, &mut seen, &mut keys)?;
+    let mut args = Vec::new();
+    for key in keys {
+        if let Some(value) = key.safe_override()? {
+            args.push("-c".into());
+            args.push(value);
+        }
+    }
+    Ok(args)
+}
+
+fn repo_config_path(root: &Path) -> Option<PathBuf> {
+    let git = root.join(".git");
+    if git.is_dir() {
+        return Some(git.join("config"));
+    }
+    if !git.is_file() {
+        return None;
+    }
+    let text = fs::read_to_string(&git).ok()?;
+    let rest = text.lines().next()?.trim().strip_prefix("gitdir:")?.trim();
+    let dir = PathBuf::from(rest);
+    let dir = if dir.is_absolute() {
+        dir
+    } else {
+        root.join(dir)
+    };
+    Some(dir.join("config"))
+}
+
+fn collect_git_keys(
+    path: &Path,
+    depth: usize,
+    seen: &mut HashSet<PathBuf>,
+    out: &mut Vec<GitKey>,
+) -> Result<(), Error> {
+    if depth > 6 || seen.len() > 32 {
+        return Err(Error::Git(
+            "refusing to run git: config include tree is too deep".into(),
+        ));
+    }
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(Error::Git(format!(
+                "refusing to run git: cannot read {}: {err}",
+                path.display()
+            )))
+        }
+    };
+    if !meta.is_file() || meta.len() > 1_048_576 {
+        return Err(Error::Git(format!(
+            "refusing to run git: config {} is not a small file",
+            path.display()
+        )));
+    }
+    let canon = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !seen.insert(canon.clone()) {
+        return Ok(());
+    }
+    let text = fs::read_to_string(&canon).map_err(|err| {
+        Error::Git(format!(
+            "refusing to run git: cannot read {}: {err}",
+            canon.display()
+        ))
+    })?;
+    let mut section_top = String::new();
+    let mut section_sub: Option<String> = None;
+    let mut includes = Vec::new();
+    for line in logical_config_lines(&text) {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(inner) = line.strip_prefix('[') {
+            let inner = inner.trim_end_matches(']').trim();
+            let (top, sub) = split_section(inner);
+            section_top = top;
+            section_sub = sub;
+            continue;
+        }
+        let Some((leaf, value)) = line.split_once('=') else {
+            continue;
+        };
+        let leaf = leaf.trim().to_ascii_lowercase();
+        let value = unquote_git(value.trim());
+        if (section_top == "include" || section_top == "includeif") && leaf == "path" {
+            includes.push(value);
+            continue;
+        }
+        if section_top.is_empty() {
+            continue;
+        }
+        out.push(GitKey {
+            top: section_top.clone(),
+            sub: section_sub.clone(),
+            leaf,
+            value,
+        });
+    }
+    for inc in includes {
+        let next = resolve_include(&canon, &inc);
+        collect_git_keys(&next, depth + 1, seen, out)?;
+    }
+    Ok(())
+}
+
+fn logical_config_lines(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in text.lines() {
+        if let Some(stripped) = line.strip_suffix('\\') {
+            cur.push_str(stripped);
+            cur.push(' ');
+        } else {
+            cur.push_str(line);
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn split_section(inner: &str) -> (String, Option<String>) {
+    let mut parts = inner.splitn(2, char::is_whitespace);
+    let top = parts.next().unwrap_or("").trim().to_ascii_lowercase();
+    let sub = parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(unquote_git);
+    if top.is_empty() {
+        (String::new(), None)
+    } else if sub.as_deref().is_some_and(|s| s.is_empty()) {
+        (top, None)
+    } else {
+        (top, sub)
+    }
+}
+
+fn unquote_git(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        let inner = &value[1..value.len() - 1];
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                if let Some(n) = chars.next() {
+                    out.push(n);
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    } else {
+        value.to_string()
+    }
+}
+
+fn resolve_include(from_file: &Path, spec: &str) -> PathBuf {
+    if let Some(rest) = spec.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    let spec = PathBuf::from(spec);
+    if spec.is_absolute() {
+        spec
+    } else {
+        from_file
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(spec)
     }
 }
 
@@ -1107,5 +1482,107 @@ mod tests {
         .unwrap();
         let pats = load_secret_patterns(&vault, None);
         assert_eq!(pats, vec!["CUSTOMTOK_".to_string()]);
+    }
+
+    fn git_config(root: &Path, key: &str, value: &str) {
+        assert!(Command::new("git")
+            .args(["config", key, value])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    #[test]
+    fn credential_helper_path_is_quoted() {
+        assert_eq!(quote_helper_path("/tmp/my keys"), "\"/tmp/my keys\"");
+        assert_eq!(quote_helper_path(r"/tmp/a\b"), r#""/tmp/a\\b""#);
+    }
+
+    #[test]
+    fn status_does_not_run_fsmonitor_or_pager() {
+        let (_dir, root) = vault_git();
+        let marker = root.join("pwned-status");
+        git_config(
+            &root,
+            "core.fsmonitor",
+            &format!("touch {}", marker.display()),
+        );
+        git_config(&root, "pager.status", "true");
+        git_config(&root, "core.pager", &format!("touch {}", marker.display()));
+        status(&root).expect("status");
+        assert!(
+            !marker.exists(),
+            "git status executed a command from repo config"
+        );
+    }
+
+    #[test]
+    fn commit_does_not_run_hook_or_clean_filter() {
+        let (_dir, root) = vault_git();
+        let marker = root.join("pwned-commit");
+        let hooks = root.join(".git/hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        let mut perm = fs::metadata(&hook).unwrap().permissions();
+        perm.set_mode(0o755);
+        fs::set_permissions(&hook, perm).unwrap();
+        git_config(
+            &root,
+            "filter.evil.clean",
+            &format!("touch {}; cat", marker.display()),
+        );
+        git_config(&root, "filter.evil.required", "true");
+        fs::write(root.join(".gitattributes"), "* filter=evil\n").unwrap();
+        fs::write(root.join("notes/a.md"), "hello\n").unwrap();
+        let extra = Vec::new();
+        commit(&ctx(&root, &extra), "no hooks").expect("commit without repo commands");
+        assert!(!marker.exists(), "pre-commit hook or clean filter ran");
+    }
+
+    #[test]
+    fn pull_does_not_run_ext_remote() {
+        let (_dir, root) = vault_git();
+        let marker = root.join("pwned-ext");
+        fs::write(root.join("notes/a.md"), "hello\n").unwrap();
+        let extra = Vec::new();
+        let c = ctx(&root, &extra);
+        commit(&c, "base").unwrap();
+        let url = format!("ext::touch% {}", marker.display());
+        assert!(Command::new("git")
+            .args(["remote", "add", "origin", &url])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        git_config(&root, "protocol.ext.allow", "always");
+        let err = pull(&c).expect_err("ext remote");
+        assert!(!marker.exists(), "ext:: remote executed during pull: {err}");
+    }
+
+    #[test]
+    fn commit_rejects_private_key_and_escaping_symlink() {
+        let (_dir, root) = vault_git();
+        let extra = Vec::new();
+        let c = ctx(&root, &extra);
+        fs::write(
+            root.join("notes/a.md"),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n",
+        )
+        .unwrap();
+        let err = commit(&c, "key").expect_err("key");
+        assert!(
+            err.to_string().contains("BEGIN") || err.to_string().contains("secret"),
+            "{err}"
+        );
+        fs::write(root.join("notes/a.md"), "ok\n").unwrap();
+        commit(&c, "clean").unwrap();
+        let outside = root.parent().unwrap().join("secret.txt");
+        fs::write(&outside, "no-token\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("notes/leak.md")).unwrap();
+        let err = commit(&c, "link").expect_err("symlink");
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "no-token\n");
     }
 }
