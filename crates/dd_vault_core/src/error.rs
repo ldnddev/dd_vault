@@ -21,6 +21,10 @@ pub enum Error {
     NoVaultToReindex,
     #[error("invalid name: {0}")]
     InvalidEntryName(String),
+    #[error("path escapes the vault: {0}")]
+    OutsideVault(String),
+    #[error("file too large to open: {}", .0.display())]
+    TooLarge(PathBuf),
     #[error("already exists: {}", .0.display())]
     AlreadyExists(PathBuf),
     #[error("{0}")]

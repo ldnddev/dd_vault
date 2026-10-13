@@ -707,8 +707,7 @@ fn cached_preview_text(
         }
         let found = tree.find_file(name)?;
         let root = vault_root.as_ref()?;
-        let path = root.join(found);
-        let raw = std::fs::read_to_string(path).ok()?;
+        let raw = dd_vault_core::read_vault_text(root, &found, 2_000_000).ok()?;
         let mut lines: Vec<&str> = raw.lines().take(80).collect();
         if raw.lines().count() > 80 {
             lines.push("…");
@@ -718,11 +717,11 @@ fn cached_preview_text(
     let resolve_image = |url: &str| -> Option<Vec<u8>> {
         let root = vault_root.as_ref()?;
         if let Some(path) = crate::images::resolve_image_path(root, note_rel.as_deref(), url) {
-            return std::fs::read(path).ok();
+            return dd_vault_core::read_prefix_nofollow(&path, 32 * 1024 * 1024).ok();
         }
         let base = std::path::Path::new(url).file_name()?.to_string_lossy();
         let found = tree.find_file(base.as_ref())?;
-        std::fs::read(root.join(found)).ok()
+        dd_vault_core::read_vault_bytes(root, &found, 32 * 1024 * 1024).ok()
     };
     let text = dd_render::render_markdown_ex(
         &src,

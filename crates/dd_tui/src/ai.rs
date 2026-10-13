@@ -384,7 +384,7 @@ impl App {
             let Some(found) = self.tree.find_file(name) else {
                 continue;
             };
-            let Ok(body) = std::fs::read_to_string(vault.root.join(&found)) else {
+            let Ok(body) = dd_vault_core::read_vault_text(&vault.root, &found, 2_000_000) else {
                 continue;
             };
             let snippet: String = body.chars().take(1200).collect();

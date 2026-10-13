@@ -31,7 +31,14 @@ pub fn walk_tree(root: &Path) -> Result<Vec<FsNode>, Error> {
 }
 
 fn walk_dir(root: &Path, rel: PathBuf) -> Result<Vec<FsNode>, Error> {
-    let abs = root.join(&rel);
+    let abs = if rel.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        match crate::fs_ops::confined_path(root, &rel) {
+            Ok(path) => path,
+            Err(_) => return Ok(Vec::new()),
+        }
+    };
     let mut nodes = Vec::new();
     let entries = match fs::read_dir(&abs) {
         Ok(e) => e,
