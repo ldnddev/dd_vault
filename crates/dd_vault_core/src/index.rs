@@ -193,6 +193,7 @@ impl Index {
                 LinkKind::Wiki => "wiki",
                 LinkKind::Md => "md",
                 LinkKind::Embed => "embed",
+                LinkKind::Url => continue,
             };
             self.conn.execute(
                 "INSERT INTO links (src_note_id, dst_raw, dst_heading, kind) VALUES (?1,?2,?3,?4)",

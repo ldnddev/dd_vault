@@ -26,6 +26,8 @@ pub enum LinkKind {
     Wiki,
     Md,
     Embed,
+    /// `http`, `https`, or `mailto`. Opened in the default app, not as a note.
+    Url,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,8 +234,15 @@ pub fn located_links(src: &str) -> Vec<LocatedLink> {
         }
         i += 1;
     }
+    out.extend(scan_bare_urls(&chars, &out));
     out.sort_by_key(|l| l.start);
     out
+}
+
+pub fn is_external_url(url: &str) -> bool {
+    let url = url.trim();
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
 }
 
 fn parse_wiki_target(inner: &str, embed: bool) -> Option<ParsedLink> {
@@ -260,8 +269,15 @@ fn parse_wiki_target(inner: &str, embed: bool) -> Option<ParsedLink> {
 }
 
 fn parse_md_target(url: &str) -> Option<ParsedLink> {
-    if url.starts_with("http://") || url.starts_with("https://") || url.starts_with('#') {
+    if url.starts_with('#') {
         return None;
+    }
+    if is_external_url(url) {
+        return Some(ParsedLink {
+            dst_raw: url.to_string(),
+            dst_heading: None,
+            kind: LinkKind::Url,
+        });
     }
     let (dst, heading) = match url.split_once('#') {
         Some((d, h)) => (d.trim().to_string(), Some(h.trim().to_string())),
@@ -276,6 +292,76 @@ fn parse_md_target(url: &str) -> Option<ParsedLink> {
     } else {
         None
     }
+}
+
+fn scan_bare_urls(chars: &[char], existing: &[LocatedLink]) -> Vec<LocatedLink> {
+    let n = chars.len();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        let scheme_len = bare_scheme_len(&chars[i..]);
+        if scheme_len == 0 || existing.iter().any(|l| i >= l.start && i < l.end) {
+            i += 1;
+            continue;
+        }
+        let mut j = i + scheme_len;
+        while j < n {
+            let c = chars[j];
+            if c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '|') {
+                break;
+            }
+            j += 1;
+        }
+        j = trim_url_tail(chars, i, j);
+        if j > i + scheme_len {
+            let url: String = chars[i..j].iter().collect();
+            out.push(LocatedLink {
+                start: i,
+                end: j,
+                link: ParsedLink {
+                    dst_raw: url,
+                    dst_heading: None,
+                    kind: LinkKind::Url,
+                },
+            });
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn bare_scheme_len(chars: &[char]) -> usize {
+    let head: String = chars.iter().take(8).collect();
+    let head = head.to_ascii_lowercase();
+    if head.starts_with("https://") {
+        8
+    } else if head.starts_with("http://") || head.starts_with("mailto:") {
+        7
+    } else {
+        0
+    }
+}
+
+fn trim_url_tail(chars: &[char], start: usize, mut end: usize) -> usize {
+    while end > start {
+        let c = chars[end - 1];
+        if matches!(c, '.' | ',' | ';' | '!' | '?') {
+            end -= 1;
+            continue;
+        }
+        if c == ')' {
+            let opens = chars[start..end].iter().filter(|ch| **ch == '(').count();
+            let closes = chars[start..end].iter().filter(|ch| **ch == ')').count();
+            if closes > opens {
+                end -= 1;
+                continue;
+            }
+        }
+        break;
+    }
+    end
 }
 
 fn parse_wikilinks(body: &str) -> Vec<ParsedLink> {
@@ -361,5 +447,16 @@ mod tests {
         let md = link_at(src, src.find("foo.md").expect("md")).expect("md");
         assert_eq!(md.dst_raw, "foo.md");
         assert!(link_at(src, 0).is_none());
+    }
+
+    #[test]
+    fn link_at_finds_urls() {
+        let src = "See [docs](https://example.com/a) and https://example.com/b.";
+        let labeled = link_at(src, src.find("docs").unwrap()).unwrap();
+        assert_eq!(labeled.kind, LinkKind::Url);
+        assert_eq!(labeled.dst_raw, "https://example.com/a");
+        let bare = link_at(src, src.find("example.com/b").unwrap()).unwrap();
+        assert_eq!(bare.dst_raw, "https://example.com/b");
+        assert!(!bare.dst_raw.ends_with('.'));
     }
 }

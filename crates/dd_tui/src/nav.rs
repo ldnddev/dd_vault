@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use dd_vault_core::{link_at, wikilink_new_rel, Session};
+use dd_vault_core::{is_external_url, link_at, wikilink_new_rel, Session};
+
+use crate::open_ext;
 
 use crate::app::{App, ConfirmKind, DiscardNext, JumpAction, Modal, NavigateTo, Pane};
 use crate::jump::Jump;
@@ -114,6 +116,13 @@ impl App {
             .unwrap_or(raw)
             .trim();
         if dst.is_empty() {
+            return;
+        }
+        if is_external_url(dst) {
+            self.push_toast(
+                ToastLevel::Info,
+                "External link. gx, Ctrl+Enter, or Ctrl+click opens it",
+            );
             return;
         }
         if dd_render::looks_like_image(dst) {
@@ -228,6 +237,152 @@ impl App {
         true
     }
 
+    /// `gx`, Ctrl+Enter, or Ctrl+click: open the link in the default app.
+    pub fn open_external_at_caret(&mut self) {
+        let Some(src) = self.editor.rel.as_ref().map(|_| self.editor.text()) else {
+            self.push_toast(ToastLevel::Info, "Open a note first");
+            return;
+        };
+        let Some(link) = link_at(&src, self.editor.cursor()) else {
+            self.push_toast(ToastLevel::Info, "No link under the caret");
+            return;
+        };
+        self.open_external_raw(&link.dst_raw);
+    }
+
+    pub fn open_external_at_preview(&mut self, x: u16, y: u16) {
+        let Some(target) = self.preview_target_at(x, y) else {
+            self.push_toast(ToastLevel::Info, "No link under the pointer");
+            return;
+        };
+        self.open_external_raw(&target);
+    }
+
+    pub fn open_external_on_preview_row(&mut self) {
+        let row = if self.preview_read {
+            self.preview_row
+        } else {
+            self.preview_scroll as usize
+        };
+        let Some(target) = self.preview_target_on_row(row) else {
+            self.push_toast(ToastLevel::Info, "No link on this preview line");
+            return;
+        };
+        self.open_external_raw(&target);
+    }
+
+    fn open_external_raw(&mut self, raw: &str) {
+        match self.external_target(raw) {
+            Ok(target) => match open_ext::launch_default_app(&target) {
+                Ok(()) => self.push_toast(ToastLevel::Info, "Opened in the default app"),
+                Err(err) => self.push_toast(ToastLevel::Error, err),
+            },
+            Err(err) => self.push_toast(ToastLevel::Info, err),
+        }
+    }
+
+    fn external_target(&self, raw: &str) -> Result<String, String> {
+        let dst = raw
+            .split('#')
+            .next()
+            .unwrap_or(raw)
+            .split('|')
+            .next()
+            .unwrap_or(raw)
+            .trim();
+        if dst.is_empty() {
+            return Err("No link under the caret".into());
+        }
+        if is_external_url(dst) {
+            return Ok(dst.to_string());
+        }
+        let Some(vault) = &self.vault else {
+            return Err("No vault open".into());
+        };
+        let Some(rel) = self.resolve_link_path(dst) else {
+            return Err(format!("No file for {dst}"));
+        };
+        if rel.is_absolute()
+            || rel
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err("That link points outside the vault".into());
+        }
+        let abs = vault.root.join(&rel);
+        if !abs.is_file() {
+            return Err(format!("{} is not a file", rel.display()));
+        }
+        let root = vault.root.canonicalize().map_err(|err| err.to_string())?;
+        let canon = abs.canonicalize().map_err(|err| err.to_string())?;
+        if !canon.starts_with(&root) {
+            return Err("That link points outside the vault".into());
+        }
+        Ok(canon.display().to_string())
+    }
+
+    fn preview_target_at(&self, x: u16, y: u16) -> Option<String> {
+        let inner = self.preview_inner;
+        if x < inner.x || y < inner.y || x >= inner.x + inner.width || y >= inner.y + inner.height {
+            return None;
+        }
+        let visual = (y - inner.y) as usize + self.preview_scroll as usize;
+        let local = (x - inner.x) as usize;
+        if self.preview_read {
+            let (line, col0) = self.preview_origin.get(visual).copied()?;
+            return self.link_covering(line, col0 + local, 1);
+        }
+        let cache = self.preview_cache.as_ref()?;
+        let width = inner.width.max(1) as usize;
+        let (line, col) = rendered_pos(&cache.text, width, visual, local)?;
+        self.link_covering(line, col, 1)
+    }
+
+    fn preview_target_on_row(&self, visual_row: usize) -> Option<String> {
+        if self.preview_read {
+            let (line, col0) = self.preview_origin.get(visual_row).copied()?;
+            let span = self
+                .preview_lines
+                .get(visual_row)
+                .map(|line| line.chars().count())
+                .unwrap_or(1)
+                .max(1);
+            return self.link_covering(line, col0, span);
+        }
+        let cache = self.preview_cache.as_ref()?;
+        let width = self.preview_inner.width.max(1) as usize;
+        let (line, col) = rendered_pos(&cache.text, width, visual_row, 0)?;
+        self.link_covering(line, col, width)
+    }
+
+    fn link_covering(&self, line: usize, col: usize, span: usize) -> Option<String> {
+        let cache = self.preview_cache.as_ref()?;
+        let end = col.saturating_add(span.max(1));
+        if let Some(hit) = cache
+            .links
+            .iter()
+            .find(|link| link.line == line && link.start < end && link.end > col)
+        {
+            return Some(hit.target.clone());
+        }
+        let rendered = cache.text.lines.get(line)?;
+        let plain: String = rendered
+            .spans
+            .iter()
+            .map(|sp| sp.content.as_ref())
+            .collect();
+        let chars = plain.chars().count();
+        let mut i = col.min(chars);
+        let stop = end.min(chars);
+        while i < stop {
+            if let Some(link) = link_at(&plain, i) {
+                return Some(link.dst_raw);
+            }
+            i += 1;
+        }
+        None
+    }
+
     pub fn save_session(&mut self) {
         let Some(vault) = &self.vault else {
             return;
@@ -313,6 +468,27 @@ fn jump_to_heading(editor: &mut dd_edit::Editor, heading: &str) {
             }
         }
     }
+}
+
+fn rendered_pos(
+    text: &ratatui::text::Text<'_>,
+    width: usize,
+    visual_row: usize,
+    local_col: usize,
+) -> Option<(usize, usize)> {
+    let w = width.max(1);
+    let mut vis = 0usize;
+    for (i, line) in text.lines.iter().enumerate() {
+        let s: String = line.spans.iter().map(|sp| sp.content.as_ref()).collect();
+        let n = s.chars().count();
+        let rows = n.div_ceil(w).max(1);
+        if visual_row < vis + rows {
+            let row_in = visual_row - vis;
+            return Some((i, row_in * w + local_col));
+        }
+        vis += rows;
+    }
+    None
 }
 
 fn visual_preview_line(

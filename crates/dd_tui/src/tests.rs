@@ -134,13 +134,13 @@ fn footer_follows_pane_mode_and_leader() {
     app.pane = Pane::Preview;
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  j/k: Scroll  g/G: Ends  Click: Follow  Ctrl+Q: Quit"
+        "F1: Help  F2: Theme  j/k: Scroll  g/G: Ends  Ctrl+click: Open  Ctrl+Q: Quit"
     );
 
     app.leader = Leader::Space;
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  Space…  p preview  ff files  vv vault  sg search  nd daily  Esc cancel"
+        "F1: Help  F2: Theme  Space…  p preview  P read  ff files  vv vault  sg search  nd daily  Esc cancel"
     );
     let chord = app.footer_hint(70);
     assert!(chord.starts_with("F1:Help  F2:Theme  Space…"), "{chord}");
@@ -1226,7 +1226,7 @@ fn notes_panel_wraps_long_lines() {
         !pane.contains("ZZWRAP"),
         "end of a long line should be below the fold until the caret moves:\n{pane}"
     );
-    let width = (app.editor_inner.width - app.editor.gutter_cols()) as usize;
+    let width = app.editor_wrap_width();
     let lines: Vec<&str> = pane.lines().collect();
     let gutter = app.editor.gutter_cols() as usize;
     let wrapped = lines[1].chars().nth(gutter).unwrap();
@@ -1269,6 +1269,148 @@ fn notes_panel_wraps_long_lines() {
         "scroll_off {}",
         app.editor.scroll_off
     );
+}
+
+#[test]
+fn gx_and_ctrl_enter_open_url_in_default_app() {
+    let (_dir, mut app) = vault_app();
+    let root = app.vault.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("notes/hello.md"),
+        "See https://example.com/docs now\n",
+    )
+    .unwrap();
+    app.load_note(std::path::PathBuf::from("notes/hello.md"));
+    let at = app.editor.text().find("example.com").unwrap();
+    app.editor.click_to(0, at);
+    crate::open_ext::clear_opened();
+    send_key(&mut app, KeyCode::Char('g'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+    assert_eq!(
+        crate::open_ext::last_opened().as_deref(),
+        Some("https://example.com/docs")
+    );
+
+    crate::open_ext::clear_opened();
+    send_key(&mut app, KeyCode::Enter, KeyModifiers::CONTROL);
+    assert_eq!(
+        crate::open_ext::last_opened().as_deref(),
+        Some("https://example.com/docs")
+    );
+}
+
+#[test]
+fn ctrl_click_opens_labeled_link() {
+    let (_dir, mut app) = vault_app();
+    let root = app.vault.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("notes/hello.md"),
+        "Go to [the docs](https://example.com/guide).\n",
+    )
+    .unwrap();
+    app.load_note(std::path::PathBuf::from("notes/hello.md"));
+    let _ = buffer_text(&mut app, 100, 24);
+    let at = app.editor.text().find("docs").unwrap();
+    let (line, col) = (0usize, at);
+    let (x, y) = editor_cell(&app, line, col);
+    crate::open_ext::clear_opened();
+    app.handle_event(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::CONTROL,
+    }))
+    .expect("ctrl click");
+    assert_eq!(
+        crate::open_ext::last_opened().as_deref(),
+        Some("https://example.com/guide")
+    );
+}
+
+fn editor_cell(app: &App, line: usize, col: usize) -> (u16, u16) {
+    let _ = line;
+    let inner = app.editor_inner;
+    let x = inner.x + app.editor.gutter_cols() + col as u16;
+    let y = inner.y;
+    (x, y)
+}
+
+#[test]
+fn space_p_reads_preview_and_yanks_rendered_lines() {
+    let (_dir, mut app) = vault_app();
+    let root = app.vault.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("notes/hello.md"),
+        "# Title\n\nAlpha line.\n\nBeta line.\n",
+    )
+    .unwrap();
+    app.load_note(std::path::PathBuf::from("notes/hello.md"));
+    let cursor = app.editor.cursor();
+    send_key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('P'), KeyModifiers::NONE);
+    assert!(app.preview_read);
+    assert_eq!(app.pane, Pane::Preview);
+    let _ = buffer_text(&mut app, 100, 24);
+    assert_eq!(app.editor_area.width, 0);
+    assert_eq!(app.tree_area.width, 0);
+    assert!(app.preview_area.height > 10);
+    assert!(
+        app.preview_lines.iter().any(|l| l.contains("Alpha")),
+        "{:?}",
+        app.preview_lines
+    );
+    let text = buffer_text(&mut app, 100, 24);
+    assert!(text.contains("reading"), "{text}");
+
+    send_key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
+    for _ in 0..6 {
+        send_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+    }
+    let yanked = app.preview_yank_text();
+    assert!(yanked.contains("Title"), "{yanked}");
+    assert!(
+        yanked.contains("Alpha") || yanked.contains("Beta"),
+        "{yanked}"
+    );
+    send_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+    assert!(app.preview_visual.is_none());
+
+    send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(!app.preview_read);
+    assert_eq!(app.pane, Pane::Editor);
+    assert_eq!(app.editor.cursor(), cursor);
+}
+
+#[test]
+fn notes_panel_wraps_on_words_with_right_pad() {
+    let (_dir, mut app) = vault_app();
+    let root = app.vault.as_ref().unwrap().root.clone();
+    let src = "word ".repeat(40);
+    std::fs::write(root.join("notes/hello.md"), &src).unwrap();
+    app.load_note(std::path::PathBuf::from("notes/hello.md"));
+
+    let text = buffer_text(&mut app, 100, 16);
+    let pane = editor_pane(&text, app.editor_inner);
+    let mut saw_word = false;
+    for line in pane.lines() {
+        if !line.contains("word") {
+            continue;
+        }
+        saw_word = true;
+        let last = line.chars().last().unwrap_or(' ');
+        assert!(
+            last == ' ' || last == '│' || last == '█',
+            "notes text should stop before the right edge:\n{pane}"
+        );
+        let gutter = app.editor.gutter_cols() as usize;
+        let content: String = line.chars().skip(gutter).collect();
+        let trimmed = content.trim_end_matches([' ', '│', '█']);
+        assert!(
+            trimmed.is_empty() || trimmed.ends_with("word"),
+            "wrap should keep whole words:\n{pane}"
+        );
+    }
+    assert!(saw_word, "expected wrapped words:\n{pane}");
 }
 
 #[test]

@@ -43,6 +43,7 @@ pub(crate) struct PreviewCache {
     pub pal: PreviewPalette,
     pub epoch: u64,
     pub text: Text<'static>,
+    pub links: Vec<dd_render::PreviewLink>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,6 +236,16 @@ pub struct App {
     pub wrap_notes: bool,
     pub preview_visible: bool,
     pub preview_scroll: u16,
+    /// Full-body reading view of the rendered preview.
+    pub preview_read: bool,
+    /// Cursor row in `preview_lines` while reading.
+    pub preview_row: usize,
+    /// Visual-line anchor while selecting preview rows to copy.
+    pub preview_visual: Option<usize>,
+    /// Wrapped preview rows from the last reading-mode draw.
+    pub preview_lines: Vec<String>,
+    /// For each reading-mode row: rendered source line and char column.
+    pub preview_origin: Vec<(usize, usize)>,
     pub preview_area: Rect,
     pub preview_inner: Rect,
     pub index: Option<Index>,
@@ -302,6 +313,11 @@ impl App {
             wrap_notes: true,
             preview_visible: true,
             preview_scroll: 0,
+            preview_read: false,
+            preview_row: 0,
+            preview_visual: None,
+            preview_lines: Vec::new(),
+            preview_origin: Vec::new(),
             preview_area: Rect::default(),
             preview_inner: Rect::default(),
             index: None,
@@ -381,6 +397,10 @@ impl App {
         self.zen = false;
         self.focus = false;
         self.explore = false;
+        self.preview_read = false;
+        self.preview_visual = None;
+        self.preview_row = 0;
+        self.preview_lines.clear();
         self.tree_split = 0;
         self.preview_split = 0;
         self.preview_scroll = 0;
@@ -540,12 +560,21 @@ impl App {
     }
 
     /// Columns available for note text. `usize::MAX` means do not wrap.
+    ///
+    /// One column stays clear on the right so glyphs do not sit under the scrollbar,
+    /// matching the preview pane.
     pub fn editor_wrap_width(&self) -> usize {
         if !self.wrap_notes {
             return usize::MAX;
         }
         let gutter = self.editor.gutter_cols();
-        (self.editor_inner.width.saturating_sub(gutter) as usize).max(1)
+        const RIGHT_PAD: u16 = 1;
+        (self
+            .editor_inner
+            .width
+            .saturating_sub(gutter)
+            .saturating_sub(RIGHT_PAD) as usize)
+            .max(1)
     }
 
     pub fn editor_title(&self) -> String {
@@ -565,7 +594,13 @@ impl App {
         match Editor::open(abs, rel.to_string_lossy().into_owned()) {
             Ok(ed) => {
                 self.editor = ed;
-                self.pane = Pane::Editor;
+                if self.preview_read {
+                    self.preview_scroll = 0;
+                    self.preview_row = 0;
+                    self.preview_visual = None;
+                } else {
+                    self.pane = Pane::Editor;
+                }
             }
             Err(err) => self.push_toast(ToastLevel::Error, err.to_string()),
         }
@@ -648,6 +683,7 @@ impl App {
             },
             Action::CopyClipboard(text) => self.copy_text_to_clipboard(&text),
             Action::FollowLink { from_gf } => self.follow_link(from_gf),
+            Action::OpenExternal => self.open_external_at_caret(),
         }
     }
 
@@ -795,12 +831,92 @@ impl App {
     }
 
     pub fn toggle_preview(&mut self) {
+        if self.preview_read {
+            self.preview_read = false;
+            self.preview_visual = None;
+        }
         self.preview_visible = !self.preview_visible;
         if !self.preview_visible && self.pane == Pane::Preview {
             self.pane = Pane::Editor;
         }
         self.leader = Leader::None;
         self.save_session();
+    }
+
+    /// `<Space>P`: preview fills the body. Esc or `<Space>P` restores the split.
+    pub fn toggle_preview_read(&mut self) {
+        self.leader = Leader::None;
+        if self.editor.rel.is_none() {
+            self.push_toast(ToastLevel::Info, "Open a note to read the preview");
+            return;
+        }
+        self.preview_read = !self.preview_read;
+        self.preview_visual = None;
+        if self.preview_read {
+            self.preview_visible = true;
+            self.pane = Pane::Preview;
+            self.preview_row = self.preview_scroll as usize;
+        } else if self.pane == Pane::Preview {
+            self.pane = Pane::Editor;
+        }
+    }
+
+    pub fn move_preview_by(&mut self, delta: isize) {
+        let n = self.preview_lines.len().max(1);
+        let cur = self.preview_row.min(n - 1) as isize;
+        let next = (cur + delta).clamp(0, (n as isize) - 1) as usize;
+        self.preview_row = next;
+        self.reveal_preview_cursor();
+    }
+
+    pub fn reveal_preview_cursor(&mut self) {
+        let view = self.preview_inner.height as usize;
+        if view == 0 {
+            return;
+        }
+        let n = self.preview_lines.len().max(1);
+        let row = self.preview_row.min(n - 1);
+        self.preview_row = row;
+        let scroll = self.preview_scroll as usize;
+        if row < scroll {
+            self.preview_scroll = row as u16;
+        } else if row >= scroll + view {
+            self.preview_scroll = row.saturating_add(1).saturating_sub(view) as u16;
+        }
+    }
+
+    /// Rendered rows covered by the preview cursor, or the visual selection.
+    pub fn preview_yank_text(&self) -> String {
+        if self.preview_lines.is_empty() {
+            return String::new();
+        }
+        let last = self.preview_lines.len() - 1;
+        let row = self.preview_row.min(last);
+        let (start, end) = match self.preview_visual {
+            Some(anchor) => {
+                let anchor = anchor.min(last);
+                (anchor.min(row), anchor.max(row))
+            }
+            None => (row, row),
+        };
+        self.preview_lines[start..=end].join("\n")
+    }
+
+    pub fn yank_preview(&mut self) {
+        let text = self.preview_yank_text();
+        if text.is_empty() {
+            return;
+        }
+        let lines = text.lines().count();
+        self.copy_text_to_clipboard(&text);
+        self.preview_visual = None;
+        self.push_toast(
+            ToastLevel::Info,
+            format!(
+                "Copied {lines} preview line{}",
+                if lines == 1 { "" } else { "s" }
+            ),
+        );
     }
 
     pub fn cycle_pane(&mut self) {
@@ -825,7 +941,7 @@ impl App {
     }
 
     pub fn tree_layout_visible(&self) -> bool {
-        if self.zen {
+        if self.preview_read || self.zen {
             return false;
         }
         if self.explore {
@@ -838,6 +954,9 @@ impl App {
     }
 
     pub fn preview_layout_visible(&self) -> bool {
+        if self.preview_read {
+            return true;
+        }
         if self.zen {
             return false;
         }
@@ -845,7 +964,7 @@ impl App {
     }
 
     pub fn ai_layout_visible(&self) -> bool {
-        !self.zen
+        !self.zen && !self.preview_read
     }
 
     pub fn toggle_focus(&mut self) {
@@ -931,9 +1050,17 @@ impl App {
         if self.vault.is_none() {
             return fit_footer(width, &left, &["<Space>vv: Open vault"], &[quit]);
         }
+        if self.preview_read {
+            let middle: &[&str] = if self.preview_visual.is_some() {
+                &["j/k: Extend", "y: Copy", "Esc: Cancel"]
+            } else {
+                &["j/k: Move", "v: Select", "y: Copy", "Esc: Back"]
+            };
+            return fit_footer(width, &left, middle, &[quit]);
+        }
         let middle: &[&str] = match self.pane {
             Pane::Tree => &["j/k: Move", "Enter: Open", "a: New", "/: Filter"],
-            Pane::Preview => &["j/k: Scroll", "g/G: Ends", "Click: Follow"],
+            Pane::Preview => &["j/k: Scroll", "g/G: Ends", "Ctrl+click: Open"],
             Pane::Editor => match self.editor.mode {
                 dd_edit::Mode::Insert => &["Esc: Normal", "Ctrl+S: Save", "[[: Link"],
                 dd_edit::Mode::Visual => &["y: Yank", "d: Delete", "Esc: Normal"],
@@ -985,6 +1112,7 @@ fn leader_footer(leader: Leader) -> (&'static [&'static str], &'static str) {
             &[
                 "Space…",
                 "p preview",
+                "P read",
                 "ff files",
                 "vv vault",
                 "sg search",

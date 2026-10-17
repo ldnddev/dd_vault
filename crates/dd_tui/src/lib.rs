@@ -11,6 +11,7 @@ mod highlight;
 mod images;
 mod jump;
 mod nav;
+mod open_ext;
 mod palette;
 mod theme;
 mod toasts;

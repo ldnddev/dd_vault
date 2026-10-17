@@ -1,5 +1,7 @@
 //! comrak AST → ratatui `Text` for the markdown preview pane.
 
+use std::cell::RefCell;
+
 use comrak::nodes::{AstNode, NodeValue};
 use comrak::{parse_document, Arena, Options};
 use ratatui::style::{Color, Modifier, Style};
@@ -66,12 +68,29 @@ pub type EmbedResolver<'a> = dyn Fn(&str) -> Option<String> + 'a;
 /// Optional resolver for markdown / wikilink images. Return encoded file bytes.
 pub type ImageResolver<'a> = dyn Fn(&str) -> Option<Vec<u8>> + 'a;
 
+/// A link hit in rendered preview text, in character columns of that line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewLink {
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+    pub target: String,
+}
+
+struct PendingLink {
+    start: usize,
+    end: usize,
+    target: String,
+}
+
 struct RenderCtx<'a> {
     p: PreviewPalette,
     image: Option<&'a ImageResolver<'a>>,
     max_width: u16,
     max_image_rows: u16,
     max_diagram_rows: u16,
+    pending: RefCell<Vec<PendingLink>>,
+    links: RefCell<Vec<PreviewLink>>,
 }
 
 pub fn render_markdown(
@@ -91,6 +110,28 @@ pub fn render_markdown_ex(
     max_image_rows: u16,
     max_diagram_rows: u16,
 ) -> Text<'static> {
+    render_markdown_annotated(
+        src,
+        palette,
+        embed,
+        image,
+        max_width,
+        max_image_rows,
+        max_diagram_rows,
+    )
+    .0
+}
+
+/// Rendered preview plus link ranges for Ctrl+click.
+pub fn render_markdown_annotated(
+    src: &str,
+    palette: PreviewPalette,
+    embed: Option<&EmbedResolver<'_>>,
+    image: Option<&ImageResolver<'_>>,
+    max_width: u16,
+    max_image_rows: u16,
+    max_diagram_rows: u16,
+) -> (Text<'static>, Vec<PreviewLink>) {
     let expanded = expand_embeds(src, embed);
     let arena = Arena::new();
     let root = parse_document(&arena, &expanded, &options());
@@ -101,6 +142,8 @@ pub fn render_markdown_ex(
         max_width: max_width.max(1),
         max_image_rows: max_image_rows.max(1),
         max_diagram_rows: max_diagram_rows.max(1),
+        pending: RefCell::new(Vec::new()),
+        links: RefCell::new(Vec::new()),
     };
     walk_block(root, &ctx, &mut out, 0);
     while out
@@ -109,7 +152,39 @@ pub fn render_markdown_ex(
     {
         out.pop();
     }
-    Text::from(out)
+    let links = ctx.links.borrow().clone();
+    let links = links.into_iter().filter(|l| l.line < out.len()).collect();
+    (Text::from(out), links)
+}
+
+fn span_chars(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+fn note_link(ctx: &RenderCtx<'_>, start: usize, end: usize, target: &str) {
+    let target = target.trim();
+    if target.is_empty() || end <= start {
+        return;
+    }
+    ctx.pending.borrow_mut().push(PendingLink {
+        start,
+        end,
+        target: target.to_string(),
+    });
+}
+
+fn commit_line(out: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>, ctx: &RenderCtx<'_>) {
+    let line = out.len();
+    let pending = std::mem::take(&mut *ctx.pending.borrow_mut());
+    ctx.links
+        .borrow_mut()
+        .extend(pending.into_iter().map(|p| PreviewLink {
+            line,
+            start: p.start,
+            end: p.end,
+            target: p.target,
+        }));
+    out.push(Line::from(spans));
 }
 
 fn options() -> Options<'static> {
@@ -192,14 +267,16 @@ fn walk_block<'a>(
             let mut spans = prefix_spans(indent);
             spans.push(Span::styled(format!("{hashes} "), p.heading()));
             collect_inlines(node, ctx, &mut spans, None, indent);
-            out.push(Line::from(spans));
+            commit_line(out, spans, ctx);
             out.push(blank());
         }
         NodeValue::Paragraph => {
             let mut spans = prefix_spans(indent);
             collect_inlines(node, ctx, &mut spans, Some(out), indent);
             if !spans_are_blank(&spans) {
-                out.push(Line::from(spans));
+                commit_line(out, spans, ctx);
+            } else {
+                ctx.pending.borrow_mut().clear();
             }
             out.push(blank());
         }
@@ -272,7 +349,9 @@ fn walk_quote<'a>(
             spans.push(Span::styled("│ ", ctx.p.quote()));
             collect_inlines(node, ctx, &mut spans, Some(out), indent);
             if !spans_are_blank(&spans) {
-                out.push(Line::from(spans));
+                commit_line(out, spans, ctx);
+            } else {
+                ctx.pending.borrow_mut().clear();
             }
         }
         NodeValue::Alert(alert) => {
@@ -309,7 +388,9 @@ fn walk_item<'a>(
                 }
                 collect_inlines(c, ctx, &mut spans, Some(out), indent);
                 if !spans_are_blank(&spans) {
-                    out.push(Line::from(spans));
+                    commit_line(out, spans, ctx);
+                } else {
+                    ctx.pending.borrow_mut().clear();
                 }
             }
             NodeValue::List(_) => walk_block(c, ctx, out, indent + 1),
@@ -329,6 +410,7 @@ fn walk_table<'a>(
         for cell in row.children() {
             let mut spans = Vec::new();
             collect_inlines(cell, ctx, &mut spans, None, indent);
+            ctx.pending.borrow_mut().clear();
             let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
             cells.push(text);
         }
@@ -378,6 +460,7 @@ fn collect_inlines<'a>(
                 }
             }
             NodeValue::Link(link) => {
+                let start_col = span_chars(spans);
                 let start = spans.len();
                 collect_inlines(c, ctx, spans, None, indent);
                 if start == spans.len() {
@@ -387,6 +470,7 @@ fn collect_inlines<'a>(
                         s.style = p.link();
                     }
                 }
+                note_link(ctx, start_col, span_chars(spans), &link.url);
             }
             NodeValue::Image(link) => {
                 let alt = inline_plain(c);
@@ -397,7 +481,7 @@ fn collect_inlines<'a>(
                 };
                 if let (Some(out), Some(resolve)) = (out.as_mut(), ctx.image) {
                     if !spans_are_blank(spans) {
-                        out.push(Line::from(std::mem::take(spans)));
+                        commit_line(out, std::mem::take(spans), ctx);
                         *spans = prefix_spans(indent);
                     } else {
                         spans.clear();
@@ -414,7 +498,9 @@ fn collect_inlines<'a>(
                 } else {
                     display
                 };
+                let start_col = span_chars(spans);
                 spans.push(Span::styled(format!("[[{label}]]"), p.link()));
+                note_link(ctx, start_col, span_chars(spans), &w.url);
             }
             _ => collect_inlines(c, ctx, spans, None, indent),
         }

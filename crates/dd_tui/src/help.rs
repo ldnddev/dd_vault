@@ -102,6 +102,7 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
             ),
             ("Ctrl+O / Ctrl+I", "Jump list back / forward"),
             ("<Space>p", "Toggle markdown preview"),
+            ("<Space>P", "Read the preview full-screen"),
             ("<Space>ff", "File finder"),
             ("<Space>sg", "Content search (FTS)"),
             ("<Space>tg", "Tag search"),
@@ -188,6 +189,10 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
             ),
             (":daily", "Open today's daily note"),
             ("gf  Enter", "Follow wikilink / markdown link"),
+            (
+                "gx  Ctrl+Enter  Ctrl+click",
+                "Open the link in its default app",
+            ),
             ("Ctrl+S", "Save"),
             ("Ctrl+V", "Paste clipboard image into assets/"),
             ("Esc", "Back to NORMAL"),
@@ -202,7 +207,11 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
         "Preview",
         &[
             ("<Space>p", "Show / hide the preview pane"),
-            ("j/k", "Scroll when preview is focused"),
+            ("<Space>P", "Expand the preview over the body"),
+            ("j/k", "Scroll, or move the reading cursor"),
+            ("v  y", "In reading view, select rows and copy them"),
+            ("Ctrl+Enter  Ctrl+click", "Open the link in its default app"),
+            ("Esc", "Leave reading view"),
             ("g / G", "Top / bottom"),
             ("Click [[link]]", "Follow wikilink in the preview"),
             (

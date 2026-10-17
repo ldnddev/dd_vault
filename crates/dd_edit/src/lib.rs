@@ -13,6 +13,92 @@ pub use keys::Key;
 
 const MAX_OPEN_BYTES: u64 = 2_000_000;
 
+/// Char index where each visual row of `line` starts.
+///
+/// Breaks on whitespace the way the preview does (`Wrap { trim: false }`): a word
+/// moves to the next row instead of splitting, and a word longer than `width`
+/// still breaks. `usize::MAX` is one row. Spaces that separate the wrapped word
+/// stay at the end of the row they fit on, so cursor columns stay contiguous.
+pub fn wrap_row_starts(line: &str, width: usize) -> Vec<usize> {
+    if width == 0 || width == usize::MAX {
+        return vec![0];
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return vec![0];
+    }
+    let mut starts = vec![0];
+    let mut i = 0;
+    while i < n {
+        if n - i <= width {
+            break;
+        }
+        let limit = i + width;
+        let mut break_at = None;
+        let mut k = i;
+        while k < limit {
+            if chars[k].is_whitespace() {
+                let mut run_end = k;
+                while run_end < n && chars[run_end].is_whitespace() {
+                    run_end += 1;
+                }
+                if run_end > limit {
+                    break;
+                }
+                let mut word_end = run_end;
+                while word_end < n && !chars[word_end].is_whitespace() {
+                    word_end += 1;
+                }
+                let word_len = word_end - run_end;
+                if k > i && word_len > 0 && run_end - i + word_len > width {
+                    break_at = Some(run_end);
+                }
+            }
+            k += 1;
+        }
+        let next = break_at.unwrap_or(limit);
+        if next <= i || next >= n {
+            break;
+        }
+        starts.push(next);
+        i = next;
+    }
+    starts
+}
+
+/// Visual row and column of a caret. A caret just past a full row gets its own row.
+pub fn visual_cursor(line: &str, col: usize, width: usize) -> (usize, usize) {
+    if width == usize::MAX {
+        return (0, col);
+    }
+    let len = line.chars().count();
+    let col = col.min(len);
+    let starts = wrap_row_starts(line, width);
+    let row = visual_row(&starts, len, col, width);
+    if row >= starts.len() {
+        return (row, 0);
+    }
+    (row, col.saturating_sub(starts[row]))
+}
+
+fn visual_row(starts: &[usize], len: usize, col: usize, width: usize) -> usize {
+    if starts.is_empty() || width == usize::MAX {
+        return 0;
+    }
+    let mut row = 0;
+    for (i, &start) in starts.iter().enumerate() {
+        if start <= col {
+            row = i;
+        }
+    }
+    let start = starts[row];
+    if col == len && len > start && len - start == width && row + 1 == starts.len() {
+        return row + 1;
+    }
+    row
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     #[default]
@@ -90,6 +176,8 @@ pub enum Action {
     FollowLink {
         from_gf: bool,
     },
+    /// Open the link under the caret in the default app (`gx`).
+    OpenExternal,
 }
 
 #[derive(Clone, Debug)]
@@ -307,7 +395,12 @@ impl Editor {
         }
         let width = Self::view_width(width);
         let caret = self.caret_pos();
-        let cursor_at = self.flat_of(caret.0, Self::row_of(caret.1, width), width, caret);
+        let cursor_at = self.flat_of(
+            caret.0,
+            self.row_of_line(caret.0, caret.1, width),
+            width,
+            caret,
+        );
         let mut origin = self.origin_flat(width, caret);
         if cursor_at < origin {
             origin = cursor_at;
@@ -361,11 +454,7 @@ impl Editor {
             let visible = rows - off_clamped;
             if row_left < visible || idx == last {
                 let wrap_row = off_clamped + row_left.min(visible.saturating_sub(1));
-                let col = if width == usize::MAX {
-                    content_col
-                } else {
-                    wrap_row.saturating_mul(width).saturating_add(content_col)
-                };
+                let col = self.col_on_visual_row(idx, wrap_row, content_col, width);
                 return (idx, col);
             }
             row_left -= visible;
@@ -386,45 +475,51 @@ impl Editor {
         self.cursor_line_col()
     }
 
-    fn row_of(col: usize, width: usize) -> usize {
+    fn row_of_line(&self, idx: usize, col: usize, width: usize) -> usize {
         if width == usize::MAX {
-            0
-        } else {
-            col / width
-        }
-    }
-
-    fn line_char_len(&self, idx: usize) -> usize {
-        let lines = self.rope.len_lines();
-        if idx >= lines {
             return 0;
         }
-        let start = self.rope.line_to_char(idx);
-        let end = if idx + 1 >= lines {
-            self.rope.len_chars()
-        } else {
-            self.rope.line_to_char(idx + 1)
-        };
-        let mut len = end.saturating_sub(start);
-        if len > 0 && self.rope.char(end - 1) == '\n' {
-            len -= 1;
-            if len > 0 && self.rope.char(start + len - 1) == '\r' {
-                len -= 1;
-            }
+        let text = self.line(idx);
+        let len = text.chars().count();
+        visual_row(&wrap_row_starts(&text, width), len, col.min(len), width)
+    }
+
+    fn col_on_visual_row(
+        &self,
+        idx: usize,
+        wrap_row: usize,
+        content_col: usize,
+        width: usize,
+    ) -> usize {
+        if width == usize::MAX {
+            return content_col;
         }
-        len
+        let text = self.line(idx);
+        let len = text.chars().count();
+        let starts = wrap_row_starts(&text, width);
+        if wrap_row >= starts.len() {
+            return len;
+        }
+        let start = starts[wrap_row];
+        let end = starts.get(wrap_row + 1).copied().unwrap_or(len);
+        let row_len = end.saturating_sub(start);
+        if row_len == 0 {
+            return start;
+        }
+        start + content_col.min(row_len.saturating_sub(1))
     }
 
     /// Visual rows this buffer line occupies, including the insert caret past a full row.
     fn line_rows_at(&self, idx: usize, width: usize, caret: (usize, usize)) -> usize {
-        let len = self.line_char_len(idx);
-        let base = if width == usize::MAX || len == 0 {
-            1
-        } else {
-            len.div_ceil(width)
-        };
+        if width == usize::MAX {
+            return 1;
+        }
+        let text = self.line(idx);
+        let len = text.chars().count();
+        let starts = wrap_row_starts(&text, width);
+        let base = starts.len().max(1);
         if idx == caret.0 {
-            base.max(Self::row_of(caret.1, width) + 1)
+            base.max(visual_row(&starts, len, caret.1.min(len), width) + 1)
         } else {
             base
         }
@@ -645,6 +740,11 @@ impl Editor {
                 self.pending = Pending::None;
                 self.take_count();
                 return Action::FollowLink { from_gf: true };
+            }
+            (Pending::G, Key::Char('x')) => {
+                self.pending = Pending::None;
+                self.take_count();
+                return Action::OpenExternal;
             }
             (Pending::D, Key::Char('d')) => {
                 self.pending = Pending::None;

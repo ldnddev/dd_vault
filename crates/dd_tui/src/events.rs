@@ -62,6 +62,9 @@ struct ViewTick {
     tree_collapsed: usize,
     preview_scroll: u16,
     preview_visible: bool,
+    preview_read: bool,
+    preview_row: usize,
+    preview_visual: Option<usize>,
     wrap_notes: bool,
     zen: bool,
     focus: bool,
@@ -129,6 +132,9 @@ impl ViewTick {
             tree_collapsed: app.tree.collapsed.len(),
             preview_scroll: app.preview_scroll,
             preview_visible: app.preview_visible,
+            preview_read: app.preview_read,
+            preview_row: app.preview_row,
+            preview_visual: app.preview_visual,
             wrap_notes: app.wrap_notes,
             zen: app.zen,
             focus: app.focus,
@@ -413,6 +419,15 @@ fn handle_key(app: &mut App, k: KeyEvent) -> Result<()> {
     {
         return Ok(());
     }
+    if k.code == KeyCode::Enter && k.modifiers.contains(KeyModifiers::CONTROL) {
+        app.leader = Leader::None;
+        if app.pane == Pane::Preview || app.preview_read {
+            app.open_external_on_preview_row();
+        } else {
+            app.open_external_at_caret();
+        }
+        return Ok(());
+    }
     if k.code == KeyCode::F(1) {
         app.leader = Leader::None;
         app.show_help = true;
@@ -462,6 +477,10 @@ fn handle_key(app: &mut App, k: KeyEvent) -> Result<()> {
 
     if app.leader != Leader::None {
         match (app.leader, k.code) {
+            (Leader::Space, KeyCode::Char('P')) => app.toggle_preview_read(),
+            (Leader::Space, KeyCode::Char('p')) if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                app.toggle_preview_read()
+            }
             (Leader::Space, KeyCode::Char('p')) => app.toggle_preview(),
             (Leader::Space, KeyCode::Char('v')) => app.leader = Leader::SpaceV,
             (Leader::SpaceV, KeyCode::Char('v')) => app.open_picker(),
@@ -498,7 +517,7 @@ fn handle_key(app: &mut App, k: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
-    if app.ai.expanded() {
+    if app.ai.expanded() && !app.preview_read {
         app.handle_ai_key(k);
         return Ok(());
     }
@@ -567,6 +586,10 @@ fn handle_filter_key(app: &mut App, k: KeyEvent) -> Result<()> {
 }
 
 fn handle_preview_key(app: &mut App, k: KeyEvent) {
+    if app.preview_read {
+        handle_preview_read_key(app, k);
+        return;
+    }
     match k.code {
         KeyCode::Down | KeyCode::Char('j') => {
             app.preview_scroll = app.preview_scroll.saturating_add(1);
@@ -582,6 +605,40 @@ fn handle_preview_key(app: &mut App, k: KeyEvent) {
         }
         KeyCode::Home | KeyCode::Char('g') => app.preview_scroll = 0,
         KeyCode::End | KeyCode::Char('G') => app.preview_scroll = u16::MAX,
+        _ => {}
+    }
+}
+
+fn handle_preview_read_key(app: &mut App, k: KeyEvent) {
+    let page = (app.preview_inner.height as isize).max(1);
+    match k.code {
+        KeyCode::Esc => {
+            if app.preview_visual.is_some() {
+                app.preview_visual = None;
+            } else {
+                app.toggle_preview_read();
+            }
+        }
+        KeyCode::Char('v') => {
+            if app.preview_visual.is_some() {
+                app.preview_visual = None;
+            } else {
+                app.preview_visual = Some(app.preview_row);
+            }
+        }
+        KeyCode::Char('y') => app.yank_preview(),
+        KeyCode::Down | KeyCode::Char('j') => app.move_preview_by(1),
+        KeyCode::Up | KeyCode::Char('k') => app.move_preview_by(-1),
+        KeyCode::PageDown => app.move_preview_by(page),
+        KeyCode::PageUp => app.move_preview_by(-page),
+        KeyCode::Home | KeyCode::Char('g') => {
+            app.preview_row = 0;
+            app.reveal_preview_cursor();
+        }
+        KeyCode::End | KeyCode::Char('G') => {
+            app.preview_row = app.preview_lines.len().saturating_sub(1);
+            app.reveal_preview_cursor();
+        }
         _ => {}
     }
 }
@@ -672,15 +729,32 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
         }
         MouseEventKind::ScrollUp if contains(app.preview_area, m.column, m.row) => {
             app.pane = Pane::Preview;
-            app.preview_scroll = app.preview_scroll.saturating_sub(3);
+            if app.preview_read {
+                app.move_preview_by(-3);
+            } else {
+                app.preview_scroll = app.preview_scroll.saturating_sub(3);
+            }
         }
         MouseEventKind::ScrollDown if contains(app.preview_area, m.column, m.row) => {
             app.pane = Pane::Preview;
-            app.preview_scroll = app.preview_scroll.saturating_add(3);
+            if app.preview_read {
+                app.move_preview_by(3);
+            } else {
+                app.preview_scroll = app.preview_scroll.saturating_add(3);
+            }
         }
         MouseEventKind::Down(MouseButton::Left) if contains(app.preview_area, m.column, m.row) => {
             app.pane = Pane::Preview;
-            app.preview_follow_at(m.column, m.row);
+            if m.modifiers.contains(KeyModifiers::CONTROL) {
+                app.open_external_at_preview(m.column, m.row);
+            } else {
+                if app.preview_read && contains(app.preview_inner, m.column, m.row) {
+                    let row = m.row.saturating_sub(app.preview_inner.y) as usize
+                        + app.preview_scroll as usize;
+                    app.preview_row = row;
+                }
+                app.preview_follow_at(m.column, m.row);
+            }
         }
         MouseEventKind::ScrollUp if contains(app.editor_area, m.column, m.row) => {
             app.pane = Pane::Editor;
@@ -696,7 +770,14 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
         }
         MouseEventKind::Down(MouseButton::Left) if contains(app.editor_inner, m.column, m.row) => {
             app.pane = Pane::Editor;
-            app.mouse_editor_down(m.column, m.row);
+            if m.modifiers.contains(KeyModifiers::CONTROL) {
+                if let Some((line, col, false)) = app.editor_hit(m.column, m.row) {
+                    app.editor.click_to(line, col);
+                    app.open_external_at_caret();
+                }
+            } else {
+                app.mouse_editor_down(m.column, m.row);
+            }
         }
         MouseEventKind::Down(MouseButton::Left) if contains(app.editor_area, m.column, m.row) => {
             app.pane = Pane::Editor;

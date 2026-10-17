@@ -28,7 +28,8 @@ pub use git::{
 };
 pub use index::{FileHit, Index};
 pub use parse::{
-    link_at, located_links, parse_note, LinkKind, LocatedLink, ParsedLink, ParsedNote,
+    is_external_url, link_at, located_links, parse_note, LinkKind, LocatedLink, ParsedLink,
+    ParsedNote,
 };
 pub use paths::Paths;
 pub use registry::{Registry, VaultEntry};

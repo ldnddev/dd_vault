@@ -238,7 +238,12 @@ fn render_body(frame: &mut Frame, app: &mut App, area: Rect) {
     app.body_width = area.width;
     let show_tree = app.tree_layout_visible();
     let right;
-    if show_tree {
+    if app.preview_read {
+        app.tree_area = Rect::default();
+        app.editor_area = Rect::default();
+        app.preview_area = area;
+        right = area;
+    } else if show_tree {
         let auto = if area.width < 80 {
             (area.width / 3).clamp(12, 24)
         } else {
@@ -261,7 +266,9 @@ fn render_body(frame: &mut Frame, app: &mut App, area: Rect) {
         right = area;
     }
     let ai_full = app.ai.size == crate::ai::AiSize::Full && app.ai_layout_visible();
-    if app.preview_layout_visible() && right.height >= 10 && right.width > 0 {
+    if app.preview_read {
+        // `preview_area` already fills the body.
+    } else if app.preview_layout_visible() && right.height >= 10 && right.width > 0 {
         let auto = (right.height * 2 / 5).clamp(6, right.height.saturating_sub(5));
         let max_h = right.height.saturating_sub(4).max(4);
         let prev_h = if app.preview_split > 0 {
@@ -724,7 +731,7 @@ fn cached_preview_text(
         let found = tree.find_file(base.as_ref())?;
         std::fs::read(root.join(found)).ok()
     };
-    let text = dd_render::render_markdown_ex(
+    let (text, links) = dd_render::render_markdown_annotated(
         &src,
         pal,
         Some(&resolve),
@@ -746,6 +753,7 @@ fn cached_preview_text(
         pal,
         epoch,
         text: text.clone(),
+        links,
     });
     text
 }
@@ -753,8 +761,13 @@ fn cached_preview_text(
 fn render_preview(frame: &mut Frame, app: &mut App, border: ratatui::style::Color) {
     use dd_render::PreviewPalette;
 
+    let title = if app.preview_read {
+        " reading "
+    } else {
+        " preview "
+    };
     let block = Block::default()
-        .title(" preview ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border))
         .style(
@@ -795,9 +808,21 @@ fn render_preview(frame: &mut Frame, app: &mut App, border: ratatui::style::Colo
         background: app.theme.body_background,
     };
     let max_w = inner.width.saturating_sub(1).max(1);
-    let max_rows = inner.height.clamp(1, 16);
-    let max_diagram_rows = inner.height.saturating_mul(2).clamp(16, 48);
+    let (max_rows, max_diagram_rows) = if app.preview_read {
+        let h = inner.height.max(1);
+        (h, h)
+    } else {
+        (
+            inner.height.clamp(1, 16),
+            inner.height.saturating_mul(2).clamp(16, 48),
+        )
+    };
     let text = cached_preview_text(app, pal, max_w, max_rows, max_diagram_rows);
+    if app.preview_read {
+        render_preview_reading(frame, app, inner, &text);
+        return;
+    }
+    app.preview_lines.clear();
     let total = text.lines.len();
     let vis = inner.height as usize;
     let max_scroll = total.saturating_sub(vis);
@@ -826,6 +851,101 @@ fn render_preview(frame: &mut Frame, app: &mut App, border: ratatui::style::Colo
             app.theme.body_background,
         );
     }
+}
+
+fn render_preview_reading(frame: &mut Frame, app: &mut App, inner: Rect, text: &Text<'_>) {
+    let width = inner.width.saturating_sub(1).max(1) as usize;
+    let rows = preview_display_lines(text, width);
+    app.preview_origin = rows.iter().map(|(_, line, col)| (*line, *col)).collect();
+    app.preview_lines = rows.into_iter().map(|(text, _, _)| text).collect();
+    let n = app.preview_lines.len().max(1);
+    if app.preview_row >= app.preview_lines.len() {
+        app.preview_row = app.preview_lines.len().saturating_sub(1);
+    }
+    app.reveal_preview_cursor();
+    let vis = inner.height as usize;
+    let total = app.preview_lines.len();
+    let max_scroll = total.saturating_sub(vis);
+    if app.preview_scroll as usize > max_scroll {
+        app.preview_scroll = max_scroll as u16;
+    }
+    let anchor = app.preview_visual;
+    let cursor = app.preview_row.min(n - 1);
+    let (sel_a, sel_b) = anchor
+        .map(|a| {
+            let a = a.min(n - 1);
+            (a.min(cursor), a.max(cursor))
+        })
+        .unwrap_or((cursor, cursor));
+    let sel_fg = app.theme.text_active_focus;
+    let sel_bg = app.theme.selected_background;
+    let cur_fg = app.theme.base_background;
+    let cur_bg = app.theme.cursor;
+    let text_fg = app.theme.text_primary;
+    let styled: Vec<Line> = app
+        .preview_lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let shown = if line.is_empty() {
+                " ".to_string()
+            } else {
+                line.clone()
+            };
+            let style = if anchor.is_some() && i >= sel_a && i <= sel_b {
+                Style::default().fg(sel_fg).bg(sel_bg)
+            } else if i == cursor {
+                Style::default().fg(cur_fg).bg(cur_bg)
+            } else {
+                Style::default().fg(text_fg)
+            };
+            Line::from(Span::styled(shown, style))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(Text::from(styled))
+            .style(
+                Style::default()
+                    .fg(app.theme.text_primary)
+                    .bg(app.theme.body_background),
+            )
+            .scroll((app.preview_scroll, 0)),
+        inner,
+    );
+    if total > vis && vis > 0 {
+        paint_scrollbar(
+            frame,
+            inner,
+            app.preview_scroll as usize,
+            total,
+            app.theme.scrollbar,
+            app.theme.scrollbar_hover,
+            app.theme.body_background,
+        );
+    }
+}
+
+fn preview_display_lines(text: &Text<'_>, width: usize) -> Vec<(String, usize, usize)> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for (line_i, line) in text.lines.iter().enumerate() {
+        let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let starts = dd_edit::wrap_row_starts(&plain, width);
+        let chars: Vec<char> = plain.chars().collect();
+        if chars.is_empty() {
+            out.push((String::new(), line_i, 0));
+            continue;
+        }
+        for (i, &start) in starts.iter().enumerate() {
+            let end = starts.get(i + 1).copied().unwrap_or(chars.len());
+            let row: String = chars[start..end].iter().collect();
+            out.push((row, line_i, start));
+        }
+    }
+    if out.is_empty() {
+        out.push((String::new(), 0, 0));
+    }
+    out
 }
 
 fn render_editor(frame: &mut Frame, app: &mut App, editor_border: ratatui::style::Color) {
@@ -940,11 +1060,12 @@ fn editor_visual_lines(app: &App, text_h: usize) -> Vec<Line<'static>> {
     let wrap_w = app.editor_wrap_width();
     let insert = app.editor.mode == Mode::Insert;
     let gutter_style = Style::default().fg(app.theme.text_secondary);
-    let (cur_row, local_col) = if wrap_w == usize::MAX {
-        (0, cur_col)
+    let cur_line_text = if cur_line < lines_n {
+        app.editor.line(cur_line)
     } else {
-        (cur_col / wrap_w, cur_col % wrap_w)
+        String::new()
     };
+    let (cur_row, local_col) = dd_edit::visual_cursor(&cur_line_text, cur_col, wrap_w);
 
     let mut lines = Vec::new();
     let mut buf_idx = app.editor.scroll;
@@ -995,30 +1116,36 @@ fn gutter_span(show_num: bool, line_no: usize, gutter_w: usize, style: Style) ->
     Span::styled(text, style)
 }
 
-/// Break a highlighted line into rows of `width` characters. `usize::MAX` keeps one row.
+/// Break a highlighted line on the same word boundaries as the editor wrap.
 fn split_spans(line: &Line<'_>, width: usize) -> Vec<Vec<Span<'static>>> {
     let width = if width == 0 { 1 } else { width };
-    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
-    let mut current: Vec<Span<'static>> = Vec::new();
-    let mut filled = 0usize;
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let mut bounds = dd_edit::wrap_row_starts(&text, width);
+    let len = text.chars().count();
+    if bounds.last().copied() != Some(len) {
+        bounds.push(len);
+    }
+    if bounds.len() < 2 {
+        bounds = vec![0, len];
+    }
+    let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new(); bounds.len() - 1];
+    let mut pos = 0usize;
     for span in &line.spans {
         let chars: Vec<char> = span.content.chars().collect();
         let mut i = 0usize;
         while i < chars.len() {
-            if filled == width {
-                rows.push(std::mem::take(&mut current));
-                filled = 0;
-            }
-            let room = width - filled;
-            let take = room.min(chars.len() - i);
+            let row = bounds.partition_point(|&b| b <= pos).saturating_sub(1);
+            let row = row.min(rows.len().saturating_sub(1));
+            let row_end = bounds.get(row + 1).copied().unwrap_or(len).max(pos + 1);
+            let take = (row_end - pos).min(chars.len() - i);
             let chunk: String = chars[i..i + take].iter().collect();
-            current.push(Span::styled(chunk, span.style));
-            filled += take;
+            rows[row].push(Span::styled(chunk, span.style));
+            pos += take;
             i += take;
         }
     }
-    if rows.is_empty() || !current.is_empty() {
-        rows.push(current);
+    if rows.is_empty() {
+        rows.push(Vec::new());
     }
     rows
 }

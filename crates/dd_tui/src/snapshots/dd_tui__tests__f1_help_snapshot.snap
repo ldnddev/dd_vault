@@ -15,14 +15,14 @@ expression: text
 │         │                      caret                                                   │         │
 │         │  • Ctrl+O / Ctrl+I   Jump list back / forward                                │         │
 │         │  • <Space>p          Toggle markdown preview                                 │         │
-│         │  • <Space>ff         File finder                                             │         │
-│         │  • <Space>sg         Content search (FTS)                                    │─────────┘
-│         │  • <Space>tg         Tag search                                              │─────────┐
+│         │  • <Space>P          Read the preview full-screen                            │         │
+│         │  • <Space>ff         File finder                                             │─────────┘
+│         │  • <Space>sg         Content search (FTS)                                    │─────────┐
+│         │  • <Space>tg         Tag search                                              │         │
 │         │  • <Space>vv         Vault picker from any pane (d removes from the list)    │         │
 │         │  • <Space>nd         Open today's daily note                                 │         │
 │         │  • <Space><Space>    Command palette                                         │         │
-│         │  • <Space>ai         Cycle AI card (collapsed / chat / full)                 │         │
-│         │  • :ai on|off|<prompt>Enable, disable, or prompt the AI                      │ok-4.6 ─┐│
+│         │  • <Space>ai         Cycle AI card (collapsed / chat / full)                 │ok-4.6 ─┐│
 │         └──────────────────────────────────────────────────────────────────────────────┘ai      ││
 └───────────────────────┘└───────────────────────────────────────────────────└────────────────────┘┘
 F1: Help  Esc: Close  Ctrl+Q: Quit

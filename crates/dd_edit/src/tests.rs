@@ -1,4 +1,4 @@
-use crate::{Action, Editor, Key, Mode};
+use crate::{wrap_row_starts, Action, Editor, Key, Mode};
 
 fn ed(text: &str) -> Editor {
     let mut e = Editor::empty();
@@ -330,6 +330,8 @@ fn gf_and_enter_request_follow_link() {
         Action::FollowLink { from_gf: true }
     );
     assert_eq!(e.handle(Key::Enter), Action::FollowLink { from_gf: false });
+    assert_eq!(e.handle(Key::Char('g')), Action::None);
+    assert_eq!(e.handle(Key::Char('x')), Action::OpenExternal);
 }
 
 #[test]
@@ -343,6 +345,22 @@ fn marks_jump() {
     e.handle(Key::Char('`'));
     e.handle(Key::Char('a'));
     assert_eq!(e.cursor_line_col().0, 1);
+}
+
+#[test]
+fn wrap_breaks_before_a_word_that_does_not_fit() {
+    let line = "AAA AAA AAAAA AA AAAAAA";
+    let starts = wrap_row_starts(line, 10);
+    let chars: Vec<char> = line.chars().collect();
+    let mut rows = Vec::new();
+    for (i, &start) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(chars.len());
+        rows.push(chars[start..end].iter().collect::<String>());
+    }
+    assert_eq!(rows, vec!["AAA AAA ", "AAAAA AA ", "AAAAAA"]);
+    let long = "AAAAAAAAAAAAAAAAAAAA    AAA";
+    let starts = wrap_row_starts(long, 20);
+    assert_eq!(starts, vec![0, 20]);
 }
 
 #[test]
