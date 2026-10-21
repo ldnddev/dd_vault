@@ -1182,6 +1182,52 @@ fn mermaid_flowchart_draws_in_preview() {
 }
 
 #[test]
+fn preview_table_columns_line_up() {
+    let (_dir, mut app) = vault_app();
+    let root = app.vault.as_ref().unwrap().root.clone();
+    std::fs::write(
+        root.join("notes/hello.md"),
+        "| Piece | Cost |\n| --- | --- |\n| Neon | $5 |\n| Railway | $1 |\n",
+    )
+    .unwrap();
+    app.load_note(std::path::PathBuf::from("notes/hello.md"));
+    let text = buffer_text(&mut app, 120, 36);
+    let pane = editor_pane(&text, app.preview_inner);
+    let lines: Vec<&str> = pane.lines().collect();
+    let grid: Vec<&&str> = lines
+        .iter()
+        .filter(|l| table_bars(l).len() >= 3 && !l.contains("AI") && !l.contains("grok"))
+        .collect();
+    assert!(grid.len() >= 4, "preview should draw a table box:\n{pane}");
+    let bars = table_bars(grid[0]);
+    for line in &grid {
+        assert_eq!(table_bars(line), bars, "columns drifted:\n{pane}");
+    }
+    assert!(pane.contains("Neon") && pane.contains("$5"), "{pane}");
+    assert!(!pane.contains("| --- |"), "{pane}");
+}
+
+fn table_bars(line: &str) -> Vec<usize> {
+    let chars: Vec<char> = line.chars().collect();
+    chars
+        .iter()
+        .enumerate()
+        .filter_map(|(i, ch)| {
+            let junction = matches!(
+                ch,
+                '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼'
+            );
+            let scrollbar = i + 1 == chars.len() && *ch == '│';
+            if junction && !scrollbar {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[test]
 fn paste_image_without_note_toasts() {
     let (_dir, mut app) = vault_app();
     app.paste_image_rgba(1, 1, &[255, 0, 0, 255]);

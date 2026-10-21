@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
 mod mermaid;
+mod table;
 mod term_image;
 
 pub use mermaid::render_mermaid;
@@ -309,8 +310,10 @@ fn walk_block<'a>(
             out.push(Line::from(Span::styled("─".repeat(24), p.muted())));
             out.push(blank());
         }
-        NodeValue::Table(_) => {
-            walk_table(node, ctx, out, indent);
+        NodeValue::Table(table) => {
+            let alignments = table.alignments.clone();
+            let columns = table.num_columns;
+            table::append(node, ctx, out, indent, &alignments, columns);
             out.push(blank());
         }
         NodeValue::Alert(alert) => {
@@ -396,30 +399,6 @@ fn walk_item<'a>(
             NodeValue::List(_) => walk_block(c, ctx, out, indent + 1),
             _ => walk_block(c, ctx, out, indent + 1),
         }
-    }
-}
-
-fn walk_table<'a>(
-    node: &'a AstNode<'a>,
-    ctx: &RenderCtx<'_>,
-    out: &mut Vec<Line<'static>>,
-    indent: usize,
-) {
-    for row in node.children() {
-        let mut cells = Vec::new();
-        for cell in row.children() {
-            let mut spans = Vec::new();
-            collect_inlines(cell, ctx, &mut spans, None, indent);
-            ctx.pending.borrow_mut().clear();
-            let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
-            cells.push(text);
-        }
-        let mut line = prefix_spans(indent);
-        line.push(Span::styled(
-            format!("│ {} │", cells.join(" │ ")),
-            ctx.p.text(),
-        ));
-        out.push(Line::from(line));
     }
 }
 
@@ -827,5 +806,140 @@ mod tests {
         assert!(is_mermaid_info("mermaid theme=dark"));
         assert!(!is_mermaid_info("rust"));
         assert!(!is_mermaid_info(""));
+    }
+
+    fn agency_table() -> &'static str {
+        "\
+| Piece | What a quiet agency costs you |
+| --- | --- |
+| Neon compute | About $5-8 with scale-to-zero on, at 0.25 CU for a workday |
+| Neon storage and history | Under $1 while the database stays around 1-2 GB |
+| Railway app, cron, and dump bucket | About $1-3, spread across the fleet |
+| Nightly `pg_dump` storage | Cents at $0.015/GB-month |
+"
+    }
+
+    fn grid_lines(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter(|l| l.contains('┌') || l.contains('│') || l.contains('└'))
+            .collect()
+    }
+
+    fn bar_cols(line: &str) -> Vec<usize> {
+        let mut cols = Vec::new();
+        let mut col = 0usize;
+        for ch in line.chars() {
+            if matches!(
+                ch,
+                '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼'
+            ) {
+                cols.push(col);
+            }
+            col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+        cols
+    }
+
+    fn assert_grid_aligned(text: &str, max_width: usize) {
+        let grid = grid_lines(text);
+        assert!(grid.len() >= 4, "{text}");
+        let bars = bar_cols(grid[0]);
+        assert!(bars.len() >= 3, "{text}");
+        for line in &grid {
+            assert_eq!(bar_cols(line), bars, "{text}");
+            let width = unicode_width::UnicodeWidthStr::width(*line);
+            assert!(
+                width <= max_width,
+                "width {width} > {max_width}: {line}\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn renders_gfm_table_as_aligned_box() {
+        let t = render_markdown_ex(agency_table(), pal(), None, None, 80, 8, 8);
+        let d = dump_text(&t);
+        assert!(d.contains('┬'), "{d}");
+        assert!(d.contains("Neon compute"), "{d}");
+        assert!(d.contains("workday"), "{d}");
+        assert!(d.contains("`pg_dump`"), "{d}");
+        assert!(!d.contains("---"), "{d}");
+        assert_grid_aligned(&d, 80);
+    }
+
+    #[test]
+    fn table_keeps_following_paragraph() {
+        let src = format!("{}\nAfter the table\n", agency_table());
+        let d = dump(&src);
+        assert!(d.contains("After the table"), "{d}");
+        assert!(d.contains('┬'), "{d}");
+    }
+
+    #[test]
+    fn table_wraps_cells_inside_the_grid() {
+        let t = render_markdown_ex(agency_table(), pal(), None, None, 36, 8, 8);
+        let d = dump_text(&t);
+        assert!(d.contains("workday"), "{d}");
+        assert_grid_aligned(&d, 36);
+        let neon = d.lines().find(|l| l.contains("Neon compute")).unwrap();
+        assert!(
+            !neon.contains("workday"),
+            "the long cost should wrap onto the next row:\n{d}"
+        );
+    }
+
+    #[test]
+    fn table_code_keeps_code_color_and_header_is_bold() {
+        let t = render_markdown(agency_table(), pal(), None);
+        let code = t
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains("pg_dump"))
+            .expect("code span");
+        assert_eq!(code.style.fg, Some(Color::Yellow));
+        let header = t
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .find(|s| s.content.contains("Piece"))
+            .expect("header");
+        assert!(header.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(header.style.fg, Some(Color::Cyan));
+    }
+
+    fn gap_after(text: &str, token: &str) -> usize {
+        let line = text
+            .lines()
+            .find(|l| l.split('│').any(|cell| cell.trim() == token))
+            .unwrap_or_else(|| panic!("no cell {token:?} in\n{text}"));
+        let cell = line
+            .split('│')
+            .find(|cell| cell.trim() == token)
+            .expect("cell");
+        cell.chars().rev().take_while(|c| *c == ' ').count()
+    }
+
+    #[test]
+    fn table_respects_column_alignment() {
+        let right = dump("| item | n |\n| :--- | ---: |\n| a | 1 |\n| bb | 20 |\n");
+        let left = dump("| item | n |\n| :--- | :--- |\n| a | 1 |\n| bb | 20 |\n");
+        assert_eq!(gap_after(&right, "1"), gap_after(&right, "20"), "{right}");
+        assert!(
+            gap_after(&left, "1") > gap_after(&left, "20"),
+            "left align should pad after the shorter number:\n{left}"
+        );
+    }
+
+    #[test]
+    fn narrow_table_stays_inside_width() {
+        let src = "| A | B |\n| --- | --- |\n| c | d |\n";
+        let t = render_markdown_ex(src, pal(), None, None, 4, 8, 8);
+        let d = dump_text(&t);
+        assert!(d.contains('c') && d.contains('d'), "{d}");
+        for line in d.lines() {
+            let width = unicode_width::UnicodeWidthStr::width(line);
+            assert!(width <= 4, "width {width}: {line}\n{d}");
+        }
     }
 }

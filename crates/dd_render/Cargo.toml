@@ -12,3 +12,4 @@ comrak.workspace = true
 image.workspace = true
 ratatui.workspace = true
 thiserror.workspace = true
+unicode-width.workspace = true
