@@ -428,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "dd_ai"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "reqwest",
  "serde",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "dd_edit"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "ropey",
  "tempfile",
@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "dd_render"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "comrak",
  "image",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "dd_tui"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "arboard",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "dd_vault"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "dd_vault_core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "hex",
  "nucleo-matcher",
