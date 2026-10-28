@@ -397,6 +397,17 @@ fn is_loopback(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
+/// Same scheme, host, and port. A redirect to another port on the same name
+/// would still send the note and API key to a different process.
+fn redirect_stays(prev: &reqwest::Url, next: &reqwest::Url) -> bool {
+    if !next.username().is_empty() || next.password().is_some() {
+        return false;
+    }
+    prev.scheme() == next.scheme()
+        && prev.host_str() == next.host_str()
+        && prev.port_or_known_default() == next.port_or_known_default()
+}
+
 fn tighten_file(path: &Path) -> Result<(), Error> {
     #[cfg(unix)]
     {
@@ -630,8 +641,7 @@ fn run_http(
                 return attempt.error(std::io::Error::other("too many AI redirects"));
             }
             if let Some(prev) = attempt.previous().last() {
-                let next = attempt.url();
-                if prev.scheme() != next.scheme() || prev.host_str() != next.host_str() {
+                if !redirect_stays(prev, attempt.url()) {
                     return attempt
                         .error(std::io::Error::other("AI redirect left the original host"));
                 }
@@ -937,6 +947,19 @@ mod tests {
         s.base_url = "http://evil.example/v1".into();
         let err = s.checked_base().unwrap_err();
         assert!(err.to_string().contains("loopback"), "{err}");
+    }
+
+    #[test]
+    fn redirect_stays_on_the_same_origin() {
+        let prev = reqwest::Url::parse("https://api.x.ai/v1/chat/completions").unwrap();
+        let same = reqwest::Url::parse("https://api.x.ai/v1/other").unwrap();
+        let port = reqwest::Url::parse("https://api.x.ai:8443/v1").unwrap();
+        let host = reqwest::Url::parse("https://evil.example/v1").unwrap();
+        let user = reqwest::Url::parse("https://user@api.x.ai/v1").unwrap();
+        assert!(redirect_stays(&prev, &same));
+        assert!(!redirect_stays(&prev, &port));
+        assert!(!redirect_stays(&prev, &host));
+        assert!(!redirect_stays(&prev, &user));
     }
 
     #[test]

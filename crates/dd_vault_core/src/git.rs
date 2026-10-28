@@ -9,7 +9,9 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::VaultConfig;
-use crate::fs_ops::{read_prefix_nofollow, symlink_target_escapes, vault_entry};
+use crate::fs_ops::{
+    read_prefix_nofollow, symlink_target_escapes, vault_entry, write_vault_nofollow,
+};
 use crate::paths::{is_metadata_dirname, Paths};
 use crate::skip::{skip_dir_name, skip_file_name};
 use crate::vault::{Vault, GITIGNORE};
@@ -167,7 +169,7 @@ pub fn commit(ctx: &GitCtx<'_>, message: &str) -> Result<GitOpResult, Error> {
             "unmerged files; pull/resolve conflicts before commit".into(),
         ));
     }
-    ensure_meta_gitignore(ctx.root);
+    ensure_meta_gitignore(ctx.root)?;
     run_git_ok(ctx.root, &["add", "-A"], ctx.credentials)?;
     unstage_skipped(ctx.root, ctx.credentials);
     let hits = scan_staged(ctx.root, ctx.extra_secret_patterns)?;
@@ -366,43 +368,44 @@ fn resolve_unmerged(root: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), Error> 
     let mut auto_merged = Vec::new();
     let ts = unix_ts();
     for rel in paths {
-        let abs = root.join(&rel);
+        let rel_path = Path::new(&rel);
+        let abs = conflict_entry(root, rel_path)?;
         let ours = show_stage(root, 2, &rel);
         let theirs = show_stage(root, 3, &rel);
         let base = show_stage(root, 1, &rel);
         match (ours.as_deref(), theirs.as_deref()) {
             (None, None) => {}
             (None, Some(theirs_bytes)) => {
-                let dest = write_sidecar(&abs, theirs_bytes, ts)?;
-                if abs.exists() {
+                let dest = write_conflict_sidecar(root, rel_path, theirs_bytes, ts)?;
+                if fs::symlink_metadata(&abs).is_ok() {
                     fs::remove_file(&abs)?;
                 }
                 run_git_ok(root, &["rm", "--", &rel], None)?;
                 sidecars.push(dest);
             }
             (Some(ours_bytes), None) => {
-                write_bytes(&abs, ours_bytes)?;
+                write_conflict_bytes(root, rel_path, ours_bytes)?;
                 run_git_ok(root, &["add", "--", &rel], None)?;
             }
             (Some(ours_bytes), Some(theirs_bytes)) => {
                 let binary = is_binary(ours_bytes) || is_binary(theirs_bytes);
                 if binary {
-                    write_bytes(&abs, ours_bytes)?;
-                    let dest = write_sidecar(&abs, theirs_bytes, ts)?;
+                    write_conflict_bytes(root, rel_path, ours_bytes)?;
+                    let dest = write_conflict_sidecar(root, rel_path, theirs_bytes, ts)?;
                     run_git_ok(root, &["add", "--", &rel], None)?;
                     sidecars.push(dest);
                     continue;
                 }
                 if let Some(base_bytes) = base.as_deref() {
                     if let Some(merged) = try_merge_file(ours_bytes, base_bytes, theirs_bytes) {
-                        write_bytes(&abs, merged.as_bytes())?;
+                        write_conflict_bytes(root, rel_path, merged.as_bytes())?;
                         run_git_ok(root, &["add", "--", &rel], None)?;
                         auto_merged.push(PathBuf::from(&rel));
                         continue;
                     }
                 }
-                write_bytes(&abs, ours_bytes)?;
-                let dest = write_sidecar(&abs, theirs_bytes, ts)?;
+                write_conflict_bytes(root, rel_path, ours_bytes)?;
+                let dest = write_conflict_sidecar(root, rel_path, theirs_bytes, ts)?;
                 run_git_ok(root, &["add", "--", &rel], None)?;
                 sidecars.push(dest);
             }
@@ -451,40 +454,77 @@ fn write_private(path: &Path, bytes: &[u8]) -> Option<()> {
     Some(())
 }
 
-fn write_sidecar(original: &Path, theirs: &[u8], ts: u64) -> Result<PathBuf, Error> {
-    let dest = sidecar_path(original, ts);
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
+fn conflict_entry(root: &Path, rel: &Path) -> Result<PathBuf, Error> {
+    let path = vault_entry(root, rel)
+        .map_err(|err| Error::Git(format!("{} is outside the vault ({err})", rel.display())))?;
+    if let Ok(meta) = fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() {
+            return Err(Error::Git(format!(
+                "refusing to write conflict through symlink {}",
+                rel.display()
+            )));
+        }
     }
-    fs::write(&dest, theirs)?;
-    Ok(dest)
+    Ok(path)
 }
 
-fn sidecar_path(original: &Path, ts: u64) -> PathBuf {
-    let parent = original.parent().unwrap_or_else(|| Path::new(""));
-    let stem = original
+fn write_conflict_bytes(root: &Path, rel: &Path, bytes: &[u8]) -> Result<(), Error> {
+    write_vault_nofollow(root, rel, bytes).map(|_| ())
+}
+
+fn write_conflict_sidecar(
+    root: &Path,
+    rel: &Path,
+    theirs: &[u8],
+    ts: u64,
+) -> Result<PathBuf, Error> {
+    let parent = rel.parent().unwrap_or_else(|| Path::new(""));
+    let stem = rel
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "note".into());
-    let ext = original
+    let ext = rel
         .extension()
         .map(|e| format!(".{}", e.to_string_lossy()))
         .unwrap_or_default();
-    let mut dest = parent.join(format!("{stem}.conflict-{ts}{ext}"));
-    let mut n = 2u32;
-    while dest.exists() {
-        dest = parent.join(format!("{stem}.conflict-{ts}-{n}{ext}"));
-        n += 1;
+    for n in 0..1000u32 {
+        let name = if n == 0 {
+            format!("{stem}.conflict-{ts}{ext}")
+        } else {
+            format!("{stem}.conflict-{ts}-{n}{ext}")
+        };
+        crate::fs_ops::validate_entry_name(&name)
+            .map_err(|err| Error::Git(format!("refusing sidecar name {name}: {err}")))?;
+        let dest_rel = if parent.as_os_str().is_empty() {
+            PathBuf::from(&name)
+        } else {
+            parent.join(&name)
+        };
+        let dest = vault_entry(root, &dest_rel).map_err(|err| {
+            Error::Git(format!(
+                "sidecar {} is outside the vault ({err})",
+                dest_rel.display()
+            ))
+        })?;
+        match fs::symlink_metadata(&dest) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(Error::Git(format!(
+                    "refusing to write sidecar through symlink {}",
+                    dest_rel.display()
+                )));
+            }
+            Ok(_) => continue,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                write_vault_nofollow(root, &dest_rel, theirs)?;
+                return Ok(dest);
+            }
+            Err(err) => return Err(err.into()),
+        }
     }
-    dest
-}
-
-fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, bytes)?;
-    Ok(())
+    Err(Error::Git(format!(
+        "could not pick a sidecar name for {}",
+        rel.display()
+    )))
 }
 
 fn is_binary(bytes: &[u8]) -> bool {
@@ -518,18 +558,43 @@ fn skip_git_rel(rel: &str) -> bool {
         .any(|part| skip_dir_name(part) || skip_file_name(part) || is_metadata_dirname(part))
 }
 
-fn ensure_meta_gitignore(root: &Path) {
-    let gi = root.join(".gitignore");
-    let existing = fs::read_to_string(&gi).unwrap_or_default();
+fn ensure_meta_gitignore(root: &Path) -> Result<(), Error> {
+    let rel = Path::new(".gitignore");
+    let path = vault_entry(root, rel)?;
+    let existing = match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(Error::Git(
+                ".gitignore is a symlink; refusing to update it".into(),
+            ));
+        }
+        Ok(meta) if meta.is_file() => {
+            if meta.len() > 1_048_576 {
+                return Ok(());
+            }
+            if meta.len() == 0 {
+                String::new()
+            } else {
+                let bytes = read_prefix_nofollow(&path, meta.len())?;
+                match String::from_utf8(bytes) {
+                    Ok(text) => text,
+                    Err(_) => return Ok(()),
+                }
+            }
+        }
+        Ok(_) => String::new(),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
     if existing.lines().any(|l| l.trim() == ".dd_vault-*/") {
-        return;
+        return Ok(());
     }
     let mut body = existing;
     if !body.is_empty() && !body.ends_with('\n') {
         body.push('\n');
     }
     body.push_str(GITIGNORE);
-    let _ = fs::write(gi, body);
+    write_vault_nofollow(root, rel, body.as_bytes())?;
+    Ok(())
 }
 
 fn unstage_skipped(root: &Path, credentials: Option<&Path>) {
@@ -721,7 +786,10 @@ fn run_git(root: &Path, args: &[&str], credentials: Option<&Path>) -> Result<Out
 /// A vault's `.git/config` is attacker-controlled when the folder is shared.
 /// `git status` runs `core.fsmonitor`, `git add` runs clean filters, `git pull`
 /// runs merge drivers and can honor `ext::` remotes, and `git push` runs every
-/// `credential.helper`. Those are cleared or replaced here.
+/// `credential.helper`. Those are cleared or replaced here. Repo aliases are
+/// cleared because older Git runs an alias that hides a real command. `url.*.insteadOf`
+/// and a custom `uploadpack` / `receivepack` cannot be overridden reliably, so
+/// those configs refuse the git invocation.
 fn harden_args(root: &Path, credentials: Option<&Path>) -> Result<Vec<String>, Error> {
     let hooks = empty_hooks_dir()?;
     let mut args = vec![
@@ -800,6 +868,29 @@ impl GitKey {
     }
 
     fn safe_override(&self) -> Result<Option<String>, Error> {
+        if self.top == "alias" {
+            let full = self.full();
+            if !safe_config_key(&full) {
+                return Err(Error::Git(format!(
+                    "refusing to run git: unsafe alias name {full:?}"
+                )));
+            }
+            return Ok(Some(format!("{full}=")));
+        }
+        if self.top == "url" && matches!(self.leaf.as_str(), "insteadof" | "pushinsteadof") {
+            return Err(Error::Git(
+                "refusing to run git: repo config rewrites remotes with url.*.insteadOf".into(),
+            ));
+        }
+        if self.top == "remote" && matches!(self.leaf.as_str(), "uploadpack" | "receivepack") {
+            if is_default_transport_program(&self.leaf, &self.value) {
+                return Ok(None);
+            }
+            return Err(Error::Git(
+                "refusing to run git: repo config sets a custom upload-pack or receive-pack program"
+                    .into(),
+            ));
+        }
         if !is_command_key(&self.top, &self.leaf) {
             return Ok(None);
         }
@@ -837,8 +928,18 @@ fn is_command_key(top: &str, leaf: &str) -> bool {
             | ("merge", "driver")
             | ("core", "pager" | "askpass")
             | ("http", "proxy" | "sslverify")
+            | ("remote", "proxy")
             | ("gpg", "program")
     )
+}
+
+fn is_default_transport_program(leaf: &str, value: &str) -> bool {
+    let value = value.trim();
+    match leaf {
+        "uploadpack" => matches!(value, "git-upload-pack" | "git upload-pack"),
+        "receivepack" => matches!(value, "git-receive-pack" | "git receive-pack"),
+        _ => false,
+    }
 }
 
 fn safe_config_key(key: &str) -> bool {
@@ -1584,5 +1685,74 @@ mod tests {
         let err = commit(&c, "link").expect_err("symlink");
         assert!(err.to_string().contains("symlink"), "{err}");
         assert_eq!(fs::read_to_string(&outside).unwrap(), "no-token\n");
+    }
+
+    #[test]
+    fn harden_args_clears_aliases_and_proxy_and_refuses_rewrites() {
+        let (_dir, root) = vault_git();
+        git_config(&root, "alias.pwn", "!touch /tmp/dd-vault-should-not-run");
+        git_config(&root, "remote.origin.proxy", "http://127.0.0.1:9");
+        let args = harden_args(&root, None).expect("harden");
+        assert!(
+            args.iter().any(|a| a == "alias.pwn="),
+            "repo alias was not cleared: {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "remote.origin.proxy="),
+            "remote proxy was not cleared: {args:?}"
+        );
+
+        git_config(&root, "url.evil.insteadof", "https://github.com/");
+        let err = harden_args(&root, None).expect_err("insteadOf");
+        assert!(err.to_string().contains("insteadOf"), "{err}");
+    }
+
+    #[test]
+    fn harden_args_refuses_custom_uploadpack() {
+        let (_dir, root) = vault_git();
+        let marker = root.join("pwned-upload");
+        git_config(
+            &root,
+            "remote.origin.uploadpack",
+            &format!("touch {}", marker.display()),
+        );
+        let err = status(&root).expect_err("custom uploadpack");
+        assert!(err.to_string().contains("upload-pack"), "{err}");
+        assert!(!marker.exists(), "upload-pack program ran");
+
+        git_config(&root, "remote.origin.uploadpack", "git-upload-pack");
+        status(&root).expect("default upload-pack is allowed");
+    }
+
+    #[test]
+    fn commit_does_not_follow_gitignore_symlink() {
+        let (_dir, root) = vault_git();
+        let outside = root.parent().unwrap().join("outside-gitignore");
+        fs::write(&outside, "original\n").unwrap();
+        fs::remove_file(root.join(".gitignore")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join(".gitignore")).unwrap();
+        fs::write(root.join("notes/a.md"), "hello\n").unwrap();
+        let extra = Vec::new();
+        let err = commit(&ctx(&root, &extra), "nope").expect_err("symlink gitignore");
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "original\n");
+    }
+
+    #[test]
+    fn conflict_write_does_not_follow_symlink() {
+        let (_dir, root) = vault_git();
+        let outside = root.parent().unwrap().join("conflict-secret.txt");
+        fs::write(&outside, "safe\n").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("notes/a.md")).unwrap();
+        let err = write_conflict_bytes(&root, Path::new("notes/a.md"), b"theirs\n")
+            .expect_err("symlink write");
+        assert!(
+            err.to_string().contains("symlink") || err.to_string().contains("escapes"),
+            "{err}"
+        );
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "safe\n");
+        let dest = write_conflict_sidecar(&root, Path::new("notes/a.md"), b"side\n", 9).unwrap();
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "side\n");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "safe\n");
     }
 }

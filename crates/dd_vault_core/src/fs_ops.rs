@@ -82,6 +82,22 @@ pub fn write_vault_file(root: &Path, rel: &Path, bytes: &[u8]) -> Result<PathBuf
     Ok(path)
 }
 
+/// Write `bytes` to `rel` and refuse to follow a final symlink.
+///
+/// [`write_vault_file`] follows an in-vault symlink so an alias edits its target.
+/// Conflict files and `.gitignore` must stay on the path git named, or a link
+/// can be aimed outside the vault between the check and the write.
+pub fn write_vault_nofollow(root: &Path, rel: &Path, bytes: &[u8]) -> Result<PathBuf, Error> {
+    let path = vault_entry(root, rel)?;
+    if let Ok(meta) = fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() {
+            return Err(Error::OutsideVault(rel.display().to_string()));
+        }
+    }
+    write_nofollow(&path, bytes)?;
+    Ok(path)
+}
+
 /// Read at most `max_bytes` without following a final symlink.
 pub fn read_prefix_nofollow(path: &Path, max_bytes: u64) -> Result<Vec<u8>, Error> {
     read_limited(path, max_bytes, true)
@@ -395,6 +411,16 @@ mod tests {
             assert_eq!(
                 fs::read_to_string(root.join("notes/inside.md")).unwrap(),
                 "updated\n"
+            );
+            assert!(matches!(
+                write_vault_nofollow(&root, Path::new("notes/leak.md"), b"pwned\n"),
+                Err(Error::OutsideVault(_))
+            ));
+            assert_eq!(fs::read_to_string(&outside).unwrap(), "secret\n");
+            write_vault_nofollow(&root, Path::new("notes/fresh.md"), b"fresh\n").unwrap();
+            assert_eq!(
+                fs::read_to_string(root.join("notes/fresh.md")).unwrap(),
+                "fresh\n"
             );
         }
     }
