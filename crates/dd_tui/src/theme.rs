@@ -1,8 +1,9 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use ldnddev_theme::{
-    load_from_file, load_from_str, ColorField, Palette, ParseMode, ThemeSource, EXTRA_MODAL_HEADER,
-    EXTRA_TEXT_DISABLED, EXTRA_TEXT_INVERSE,
+    apply_omarchy, load_from_file, load_from_str, ColorField, OmarchyChoice, OmarchyPaths, Palette,
+    ParseMode, ThemeSource, EXTRA_MODAL_HEADER, EXTRA_TEXT_DISABLED, EXTRA_TEXT_INVERSE,
 };
 use ratatui::style::{Color, Style};
 
@@ -48,6 +49,8 @@ pub struct AppTheme {
     pub header_quotes: Vec<String>,
     pub source: ThemeSource,
     pub version: u64,
+    pub omarchy: Option<OmarchyChoice>,
+    pub overrides: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -67,16 +70,21 @@ impl AppTheme {
     }
 
     pub fn load_from(project_root: &Path, config_home: Option<&Path>) -> ThemeLoad {
+        Self::load_resolved(project_root, config_home, &OmarchyPaths::system())
+    }
+
+    pub fn load_resolved(
+        project_root: &Path,
+        config_home: Option<&Path>,
+        omarchy: &OmarchyPaths,
+    ) -> ThemeLoad {
         let mut warning = None;
 
         let local = ldnddev_theme::local_theme_path(project_root, THEME_FILENAME);
         if local.exists() {
             match load_from_file(&local, ParseMode::Strict, ThemeSource::Local) {
                 Ok(palette) => {
-                    return ThemeLoad {
-                        theme: Self::from_palette(palette, ThemeSource::Local),
-                        warning,
-                    };
+                    return finish_palette(palette, ThemeSource::Local, omarchy, warning)
                 }
                 Err(err) => {
                     warning = Some(format!(
@@ -92,10 +100,7 @@ impl AppTheme {
             if global.exists() {
                 match load_from_file(&global, ParseMode::Strict, ThemeSource::Global) {
                     Ok(palette) => {
-                        return ThemeLoad {
-                            theme: Self::from_palette(palette, ThemeSource::Global),
-                            warning,
-                        };
+                        return finish_palette(palette, ThemeSource::Global, omarchy, warning)
                     }
                     Err(err) => {
                         warning = Some(format!(
@@ -165,7 +170,29 @@ impl AppTheme {
             header_quotes: palette.header_quotes,
             source,
             version: palette.version,
+            omarchy: palette.omarchy,
+            overrides: palette.overrides,
         }
+    }
+}
+
+fn finish_palette(
+    palette: Palette,
+    source: ThemeSource,
+    omarchy: &OmarchyPaths,
+    warning: Option<String>,
+) -> ThemeLoad {
+    match apply_omarchy(&palette, omarchy) {
+        Ok(resolved) => ThemeLoad {
+            theme: AppTheme::from_palette(resolved, source),
+            warning,
+        },
+        Err(err) => ThemeLoad {
+            theme: AppTheme::builtin(),
+            warning: Some(format!(
+                "omarchy theme failed ({err}); using built-in defaults"
+            )),
+        },
     }
 }
 
@@ -198,6 +225,8 @@ pub fn palette_from_theme(theme: &AppTheme) -> Palette {
     palette.header_quotes = theme.header_quotes.clone();
     palette.source = theme.source;
     palette.version = theme.version;
+    palette.omarchy = theme.omarchy.clone();
+    palette.overrides = theme.overrides.clone();
     for (key, color) in [
         ("base_background", theme.base_background),
         ("body_background", theme.body_background),
@@ -311,6 +340,54 @@ mod tests {
         let loaded = AppTheme::load_from(project.path(), Some(xdg.path()));
         assert_eq!(loaded.theme.source, ThemeSource::Global);
         assert_eq!(color_to_hex(loaded.theme.base_background), "#ABCDEF");
+    }
+
+    #[test]
+    fn omarchy_link_maps_colors_and_keeps_override() {
+        let project = tempfile::tempdir().expect("project");
+        let root = tempfile::tempdir().expect("omarchy");
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../ldnddev_theme/tests/fixtures/omarchy/tokyo-night/colors.toml");
+        fs::create_dir_all(root.path().join("stock/tokyo-night")).expect("mkdir");
+        fs::copy(src, root.path().join("stock/tokyo-night/colors.toml")).expect("copy");
+        fs::write(
+            project.path().join(THEME_FILENAME),
+            "version: 1\nomarchy: tokyo-night\ncolors:\n  text_labels: \"#ABCDEF\"\n",
+        )
+        .expect("yaml");
+        let loaded = AppTheme::load_resolved(
+            project.path(),
+            None,
+            &ldnddev_theme::OmarchyPaths::from_root(root.path()),
+        );
+        assert!(loaded.warning.is_none(), "{:?}", loaded.warning);
+        assert_eq!(color_to_hex(loaded.theme.body_background), "#1A1B26");
+        assert_eq!(color_to_hex(loaded.theme.text_labels), "#ABCDEF");
+        assert_eq!(
+            loaded.theme.omarchy,
+            Some(ldnddev_theme::OmarchyChoice::Theme("tokyo-night".into()))
+        );
+        assert!(loaded.theme.overrides.contains("text_labels"));
+    }
+
+    #[test]
+    fn missing_omarchy_theme_uses_builtin_with_warning() {
+        let project = tempfile::tempdir().expect("project");
+        let root = tempfile::tempdir().expect("omarchy");
+        fs::write(
+            project.path().join(THEME_FILENAME),
+            "version: 1\nomarchy: missing-theme\n",
+        )
+        .expect("yaml");
+        let loaded = AppTheme::load_resolved(
+            project.path(),
+            None,
+            &ldnddev_theme::OmarchyPaths::from_root(root.path()),
+        );
+        let warning = loaded.warning.unwrap_or_default();
+        assert!(warning.contains("omarchy theme failed"), "{warning}");
+        assert_eq!(loaded.theme.source, ThemeSource::Default);
+        assert_eq!(color_to_hex(loaded.theme.base_background), "#0F1114");
     }
 
     #[test]

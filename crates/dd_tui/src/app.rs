@@ -221,7 +221,10 @@ pub struct App {
     pub help_scroll: u16,
     pub help_scroll_max: u16,
     pub show_theme: bool,
+    pub theme_picker: Option<ldnddev_theme::ThemePicker>,
     pub theme_editor: Option<ldnddev_theme::ThemeEditor>,
+    pub omarchy_paths: ldnddev_theme::OmarchyPaths,
+    pub follow_stamp: Option<String>,
     pub theme_status: Option<String>,
     pub pane: Pane,
     pub tree: TreeState,
@@ -283,8 +286,65 @@ impl App {
         app
     }
 
+    /// Re-read `omarchy: follow` when the desktop theme file changes.
+    pub fn refresh_followed_theme(&mut self) -> bool {
+        if self.show_theme {
+            return false;
+        }
+        if !matches!(
+            self.theme.omarchy,
+            Some(ldnddev_theme::OmarchyChoice::Follow)
+        ) {
+            return false;
+        }
+        let stamp = ldnddev_theme::follow_stamp(&self.omarchy_paths);
+        if stamp == self.follow_stamp {
+            return false;
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let load = crate::theme::AppTheme::load_resolved(
+            &cwd,
+            ldnddev_theme::default_config_home().as_deref(),
+            &self.omarchy_paths,
+        );
+        self.follow_stamp = stamp;
+        self.theme = load.theme;
+        if let Some(msg) = load.warning {
+            self.push_toast(ToastLevel::Warning, msg);
+        }
+        true
+    }
+
+    pub fn open_theme_ui(&mut self) {
+        self.show_theme = true;
+        self.leader = Leader::None;
+        let palette = crate::theme::palette_from_theme(&self.theme);
+        let picker = ldnddev_theme::ThemePicker::new(
+            palette.clone(),
+            crate::theme::extra_theme_fields(),
+            self.omarchy_paths.clone(),
+        );
+        if picker.lists_omarchy() {
+            self.theme_picker = Some(picker);
+            self.theme_editor = None;
+        } else {
+            self.theme_picker = None;
+            self.theme_editor = Some(ldnddev_theme::ThemeEditor::new(
+                palette,
+                crate::theme::extra_theme_fields(),
+            ));
+        }
+    }
+
     pub fn new(theme: AppTheme) -> Self {
         let header_copy = choose_header_copy(&theme.header_quotes);
+        let omarchy_paths = ldnddev_theme::OmarchyPaths::system();
+        let follow_stamp = match &theme.omarchy {
+            Some(ldnddev_theme::OmarchyChoice::Follow) => {
+                ldnddev_theme::follow_stamp(&omarchy_paths)
+            }
+            _ => None,
+        };
         Self {
             theme,
             header_copy,
@@ -299,7 +359,10 @@ impl App {
             help_scroll: 0,
             help_scroll_max: 0,
             show_theme: false,
+            theme_picker: None,
             theme_editor: None,
+            omarchy_paths,
+            follow_stamp,
             theme_status: None,
             pane: Pane::Tree,
             tree: TreeState::default(),

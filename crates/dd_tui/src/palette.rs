@@ -224,13 +224,7 @@ impl App {
                 self.show_help = true;
                 self.help_scroll = 0;
             }
-            "theme" => {
-                self.show_theme = true;
-                self.theme_editor = Some(ldnddev_theme::ThemeEditor::new(
-                    crate::theme::palette_from_theme(&self.theme),
-                    crate::theme::extra_theme_fields(),
-                ));
-            }
+            "theme" => self.open_theme_ui(),
             "preview" => self.toggle_preview(),
             "files" => self.open_finder(crate::app::FinderKind::Files),
             "content" => self.open_finder(crate::app::FinderKind::Content),

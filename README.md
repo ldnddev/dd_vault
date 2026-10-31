@@ -1,6 +1,6 @@
 # dd_vault
 
-Keyboard-first, vim-flavored markdown vault TUI. Files on disk are the source of truth. Version 0.1.10. Linux and macOS. Rust 1.82+. MIT.
+Keyboard-first, vim-flavored markdown vault TUI. Files on disk are the source of truth. Version 0.1.11. Linux and macOS. Rust 1.82+. MIT.
 
 **Tutorial:** https://ldnddev.github.io/dd_vault/
 

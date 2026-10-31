@@ -22,6 +22,10 @@ fn send_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
 fn chrome_app() -> App {
     let mut app = App::new(AppTheme::default());
     app.header_copy = "Files on disk. Opinions in git.".to_string();
+    // No Omarchy themes here, so F2 opens the hex editor directly.
+    app.omarchy_paths = ldnddev_theme::OmarchyPaths::from_root(std::path::Path::new(
+        "/nonexistent/dd_vault_omarchy",
+    ));
     app
 }
 
@@ -49,6 +53,43 @@ fn f1_opens_and_closes() {
     assert!(app.show_help);
     send_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
     assert!(!app.show_help);
+}
+
+#[test]
+fn f2_lists_omarchy_themes_and_esc_reverts() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../ldnddev_theme/tests/fixtures/omarchy/tokyo-night/colors.toml");
+    std::fs::create_dir_all(dir.path().join("stock/tokyo-night")).expect("mkdir");
+    std::fs::copy(&src, dir.path().join("stock/tokyo-night/colors.toml")).expect("copy");
+    std::fs::create_dir_all(dir.path().join("state/theme")).expect("state");
+    std::fs::write(dir.path().join("state/theme.name"), "tokyo-night\n").expect("name");
+    std::fs::copy(&src, dir.path().join("state/theme/colors.toml")).expect("current");
+
+    let mut app = chrome_app();
+    app.omarchy_paths = ldnddev_theme::OmarchyPaths::from_root(dir.path());
+    let before = crate::theme::color_to_hex(app.theme.body_background);
+    send_key(&mut app, KeyCode::F(2), KeyModifiers::NONE);
+    assert!(app.show_theme);
+    assert!(app.theme_picker.is_some());
+    assert!(app.theme_editor.is_none());
+    send_key(&mut app, KeyCode::Char('g'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(
+        crate::theme::color_to_hex(app.theme.body_background),
+        "#1A1B26"
+    );
+    send_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
+    assert!(app.theme_editor.is_some());
+    send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(app.show_theme);
+    assert!(app.theme_editor.is_none());
+    send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(!app.show_theme);
+    assert_eq!(
+        crate::theme::color_to_hex(app.theme.body_background),
+        before
+    );
 }
 
 #[test]

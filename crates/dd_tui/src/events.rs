@@ -11,12 +11,13 @@ use dd_edit::{Key as EditKey, Mode};
 use crate::app::{
     App, ConfirmKind, FinderKind, Leader, Modal, MouseDrag, Pane, SplitDrag, DOUBLE_CLICK_MS,
 };
-use crate::theme::{apply_palette, extra_theme_fields, palette_from_theme, THEME_FILENAME};
+use crate::theme::{apply_palette, extra_theme_fields, THEME_FILENAME};
 use crate::toasts::ToastLevel;
 
 pub fn handle_event(app: &mut App, evt: Event) -> Result<bool> {
     match &evt {
-        Event::FocusGained | Event::FocusLost => return Ok(false),
+        Event::FocusGained => return Ok(app.refresh_followed_theme()),
+        Event::FocusLost => return Ok(false),
         Event::Key(k) if k.kind == KeyEventKind::Release => return Ok(false),
         Event::Mouse(m) if matches!(m.kind, MouseEventKind::Moved) => return Ok(false),
         Event::Resize(_, _) => return Ok(true),
@@ -109,7 +110,12 @@ impl ViewTick {
             show_help: app.show_help,
             help_scroll: app.help_scroll,
             show_theme: app.show_theme,
-            theme_sel: app.theme_editor.as_ref().map(|e| e.selected).unwrap_or(0),
+            theme_sel: app
+                .theme_editor
+                .as_ref()
+                .map(|editor| editor.selected)
+                .or_else(|| app.theme_picker.as_ref().map(|picker| picker.selected))
+                .unwrap_or(0),
             has_modal: app.modal.is_some(),
             modal_sel,
             modal_q,
@@ -214,20 +220,17 @@ fn handle_theme(app: &mut App, evt: Event) -> Result<()> {
             if k.code == KeyCode::F(2) {
                 close_theme(app, true);
             } else if let Some(ek) = map_editor_key(k) {
-                dispatch_theme_editor(app, ek, k.modifiers.contains(KeyModifiers::SHIFT));
+                let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+                if app.theme_editor.is_some() {
+                    dispatch_theme_editor(app, ek, shift);
+                } else {
+                    dispatch_theme_picker(app, ek);
+                }
             }
         }
         Event::Mouse(m) => match m.kind {
-            MouseEventKind::ScrollUp => {
-                if let Some(editor) = app.theme_editor.as_mut() {
-                    editor.select(editor.selected.saturating_sub(1));
-                }
-            }
-            MouseEventKind::ScrollDown => {
-                if let Some(editor) = app.theme_editor.as_mut() {
-                    editor.select(editor.selected.saturating_add(1));
-                }
-            }
+            MouseEventKind::ScrollUp => scroll_theme(app, -1),
+            MouseEventKind::ScrollDown => scroll_theme(app, 1),
             _ => {}
         },
         _ => {}
@@ -435,12 +438,7 @@ fn handle_key(app: &mut App, k: KeyEvent) -> Result<()> {
         return Ok(());
     }
     if k.code == KeyCode::F(2) {
-        app.leader = Leader::None;
-        app.show_theme = true;
-        app.theme_editor = Some(ldnddev_theme::ThemeEditor::new(
-            palette_from_theme(&app.theme),
-            extra_theme_fields(),
-        ));
+        app.open_theme_ui();
         return Ok(());
     }
 
@@ -873,6 +871,105 @@ impl App {
     }
 }
 
+fn scroll_theme(app: &mut App, delta: i32) {
+    if let Some(editor) = app.theme_editor.as_mut() {
+        let next = editor.selected as i32 + delta;
+        editor.select(next.max(0) as usize);
+        return;
+    }
+    if let Some(picker) = app.theme_picker.as_mut() {
+        let next = picker.selected as i32 + delta;
+        picker.select(next.max(0) as usize);
+    }
+}
+
+fn dispatch_theme_picker(app: &mut App, ek: ldnddev_theme::EditorKey) {
+    let outcome = {
+        let Some(picker) = app.theme_picker.as_mut() else {
+            return;
+        };
+        picker.handle(ek)
+    };
+    match outcome {
+        ldnddev_theme::PickerOutcome::Applied => {
+            if let Some(picker) = &app.theme_picker {
+                apply_palette(&mut app.theme, &picker.palette);
+            }
+        }
+        ldnddev_theme::PickerOutcome::EditColors => {
+            let Some(picker) = app.theme_picker.as_ref() else {
+                return;
+            };
+            let mut editor =
+                ldnddev_theme::ThemeEditor::new(picker.palette.clone(), extra_theme_fields());
+            editor.save_target = picker.save_target;
+            app.theme_editor = Some(editor);
+        }
+        ldnddev_theme::PickerOutcome::RequestSave => {
+            let saved = app
+                .theme_picker
+                .as_ref()
+                .map(|picker| (picker.palette.clone(), picker.save_target));
+            if let Some((palette, target)) = saved {
+                save_theme_palette(app, &palette, target);
+            }
+        }
+        ldnddev_theme::PickerOutcome::Error(msg) => {
+            app.push_toast(ToastLevel::Error, msg);
+        }
+        ldnddev_theme::PickerOutcome::Closed { .. } => close_theme(app, true),
+        ldnddev_theme::PickerOutcome::None => {}
+    }
+}
+
+fn save_theme_palette(
+    app: &mut App,
+    palette: &ldnddev_theme::Palette,
+    target: ldnddev_theme::ThemeSaveTarget,
+) {
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let fields = app
+        .theme_editor
+        .as_ref()
+        .map(|editor| editor.fields.clone())
+        .unwrap_or_else(|| {
+            let mut fields = ldnddev_theme::COLOR_FIELDS.to_vec();
+            for extra in extra_theme_fields() {
+                if !fields.iter().any(|field| field.key == extra.key) {
+                    fields.push(*extra);
+                }
+            }
+            fields
+        });
+    match ldnddev_theme::save_theme(
+        palette,
+        &root,
+        THEME_FILENAME,
+        target,
+        ldnddev_theme::default_config_home().as_deref(),
+        &fields,
+    ) {
+        Ok(path) => {
+            apply_palette(&mut app.theme, palette);
+            app.theme.source = match target {
+                ldnddev_theme::ThemeSaveTarget::Local => ldnddev_theme::ThemeSource::Local,
+                ldnddev_theme::ThemeSaveTarget::Global => ldnddev_theme::ThemeSource::Global,
+            };
+            app.follow_stamp = ldnddev_theme::follow_stamp(&app.omarchy_paths);
+            app.theme_editor = None;
+            app.theme_picker = None;
+            app.show_theme = false;
+            app.push_toast(
+                ToastLevel::Success,
+                format!("Theme saved ({})", path.display()),
+            );
+        }
+        Err(err) => {
+            app.push_toast(ToastLevel::Error, format!("Theme save failed: {err}"));
+        }
+    }
+}
+
 fn dispatch_theme_editor(app: &mut App, ek: ldnddev_theme::EditorKey, shift: bool) {
     let outcome = {
         let Some(editor) = app.theme_editor.as_mut() else {
@@ -883,44 +980,33 @@ fn dispatch_theme_editor(app: &mut App, ek: ldnddev_theme::EditorKey, shift: boo
     match outcome {
         ldnddev_theme::EditorOutcome::PaletteChanged => {
             if let Some(editor) = &app.theme_editor {
+                if let Some(picker) = app.theme_picker.as_mut() {
+                    picker.palette = editor.palette.clone();
+                    picker.save_target = editor.save_target;
+                }
                 apply_palette(&mut app.theme, &editor.palette);
             }
         }
         ldnddev_theme::EditorOutcome::RequestSave => {
-            if let Some(editor) = &app.theme_editor {
-                let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                match ldnddev_theme::save_theme(
-                    &editor.palette,
-                    &root,
-                    THEME_FILENAME,
-                    editor.save_target,
-                    ldnddev_theme::default_config_home().as_deref(),
-                    &editor.fields,
-                ) {
-                    Ok(path) => {
-                        apply_palette(&mut app.theme, &editor.palette);
-                        app.theme.source = match editor.save_target {
-                            ldnddev_theme::ThemeSaveTarget::Local => {
-                                ldnddev_theme::ThemeSource::Local
-                            }
-                            ldnddev_theme::ThemeSaveTarget::Global => {
-                                ldnddev_theme::ThemeSource::Global
-                            }
-                        };
-                        app.theme_editor = None;
-                        app.show_theme = false;
-                        app.push_toast(
-                            ToastLevel::Success,
-                            format!("Theme saved ({})", path.display()),
-                        );
-                    }
-                    Err(err) => {
-                        app.push_toast(ToastLevel::Error, format!("Theme save failed: {err}"));
-                    }
-                }
+            if let Some(editor) = app.theme_editor.as_ref() {
+                let palette = editor.palette.clone();
+                let target = editor.save_target;
+                save_theme_palette(app, &palette, target);
             }
         }
-        ldnddev_theme::EditorOutcome::Closed { .. } => close_theme(app, true),
+        ldnddev_theme::EditorOutcome::Closed { .. } => {
+            if app.theme_picker.is_some() {
+                if let Some(editor) = app.theme_editor.take() {
+                    if let Some(picker) = app.theme_picker.as_mut() {
+                        picker.palette = editor.palette.clone();
+                        picker.save_target = editor.save_target;
+                    }
+                    apply_palette(&mut app.theme, &editor.palette);
+                }
+            } else {
+                close_theme(app, true);
+            }
+        }
         ldnddev_theme::EditorOutcome::HexError(msg) => {
             app.push_toast(ToastLevel::Error, msg);
         }
@@ -929,12 +1015,17 @@ fn dispatch_theme_editor(app: &mut App, ek: ldnddev_theme::EditorKey, shift: boo
 }
 
 fn close_theme(app: &mut App, revert: bool) {
-    if let Some(mut editor) = app.theme_editor.take() {
-        if revert {
+    if revert {
+        if let Some(picker) = app.theme_picker.as_ref() {
+            let palette = picker.revert_palette();
+            apply_palette(&mut app.theme, &palette);
+        } else if let Some(mut editor) = app.theme_editor.take() {
             editor.revert();
             apply_palette(&mut app.theme, &editor.palette);
         }
     }
+    app.theme_picker = None;
+    app.theme_editor = None;
     app.show_theme = false;
 }
 

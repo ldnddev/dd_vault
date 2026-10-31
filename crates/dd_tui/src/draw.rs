@@ -56,13 +56,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.show_theme {
         if let Some(editor) = app.theme_editor.clone() {
             render_theme_editor(frame, app, &editor);
-        } else {
-            render_scroll_modal(
-                frame,
-                app,
-                "Theme (F2 / Esc to close, j/k or arrows to scroll)",
-                false,
-            );
+        } else if let Some(picker) = app.theme_picker.clone() {
+            render_theme_picker(frame, app, &picker);
         }
     }
 
@@ -376,7 +371,12 @@ fn render_theme_editor(frame: &mut Frame, app: &App, editor: &ldnddev_theme::The
             app.theme.version
         )),
         Line::from(if editor.editing_hex {
-            format!("Hex: {}█   Y save   R reset   Esc revert", editor.hex_draft)
+            format!("Hex: {}█   Y save   R reset   Esc back", editor.hex_draft)
+        } else if app.theme_picker.is_some() {
+            format!(
+                "Hex: {}   Enter edit   +/- nudge   Y save   R reset   Esc back",
+                editor.hex_draft
+            )
         } else {
             format!(
                 "Hex: {}   Enter edit   +/- nudge   Y save   R reset   Esc revert",
@@ -432,6 +432,64 @@ fn render_theme_editor(frame: &mut Frame, app: &App, editor: &ldnddev_theme::The
         Paragraph::new(lines).block(
             Block::default()
                 .title("F2 Theme editor")
+                .borders(Borders::ALL)
+                .border_style(app.theme.active_border)
+                .title_style(
+                    Style::default()
+                        .fg(app.theme.modal_header)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .style(
+                    Style::default()
+                        .bg(app.theme.modal_background)
+                        .fg(app.theme.modal_text),
+                ),
+        ),
+        area,
+    );
+}
+
+fn render_theme_picker(frame: &mut Frame, app: &App, picker: &ldnddev_theme::ThemePicker) {
+    use ldnddev_theme::PickerRow;
+    let area = centered_rect(70, 80, frame.area());
+    frame.render_widget(Clear, area);
+    let mut lines = vec![
+        Line::from(format!(
+            "Save: {} (Tab)    Enter apply    e edit colors    s save    Esc revert",
+            picker.save_target.label()
+        )),
+        Line::from(""),
+    ];
+    let view_h = area.height.saturating_sub(5) as usize;
+    for (idx, row) in picker
+        .rows
+        .iter()
+        .enumerate()
+        .skip(picker.scroll)
+        .take(view_h.max(1))
+    {
+        let (label, detail) = match row {
+            PickerRow::Follow { name } => ("Follow desktop".to_string(), name.clone()),
+            PickerRow::Theme(theme) => (theme.name.clone(), theme.mode.label().to_string()),
+            PickerRow::Custom => ("Custom".to_string(), "built-in".to_string()),
+        };
+        let cursor = if idx == picker.selected { ">" } else { " " };
+        let style = if idx == picker.selected {
+            Style::default()
+                .fg(app.theme.text_active_focus)
+                .bg(app.theme.selected_background)
+        } else {
+            Style::default().fg(app.theme.modal_text)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{cursor} {label:<22} {detail}"),
+            style,
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title("F2 Themes")
                 .borders(Borders::ALL)
                 .border_style(app.theme.active_border)
                 .title_style(

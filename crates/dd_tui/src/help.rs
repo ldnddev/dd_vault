@@ -90,10 +90,7 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
         "Global",
         &[
             ("F1", "Open/close this help"),
-            (
-                "F2",
-                "Live theme editor (source, tokens, save local/global)",
-            ),
+            ("F2", "Omarchy themes (Enter apply, e edit, s save)"),
             ("Ctrl+Q", "Quit"),
             ("Tab", "Focus tree → editor → preview"),
             (
@@ -138,10 +135,15 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
         &[
             ("F1 / Esc", "Close help"),
             ("F2 / Esc", "Close theme (Esc reverts unsaved edits)"),
-            ("j/k or arrows", "Scroll or move the selected token"),
-            ("Y / S", "Save theme"),
+            ("Enter", "Apply the highlighted Omarchy theme"),
+            ("e", "Edit colors for the applied theme"),
+            (
+                "j/k or arrows",
+                "Move in the theme list or the color editor",
+            ),
+            ("Y / S", "Save the theme name (hex edits are overrides)"),
             ("Tab", "Toggle save target local ↔ global"),
-            ("R", "Reset to built-in palette"),
+            ("R", "Reset the color editor to the built-in palette"),
         ],
         h_style,
         k_style,

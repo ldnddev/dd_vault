@@ -8,7 +8,7 @@ expression: text
 ┌ vault ──│Global                                                                        │─────────┐
 │<Space>vv│                                                                              │         │
 │to open a│  • F1                Open/close this help                                    │         │
-│         │  • F2                Live theme editor (source, tokens, save local/global)   │         │
+│         │  • F2                Omarchy themes (Enter apply, e edit, s save)            │         │
 │         │  • Ctrl+Q            Quit                                                    │         │
 │         │  • Tab               Focus tree → editor → preview                           │         │
 │         │  • gf / Enter        Follow [[wikilink]] or local markdown link under the    │         │

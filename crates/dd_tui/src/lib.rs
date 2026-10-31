@@ -14,6 +14,7 @@ mod nav;
 mod open_ext;
 mod palette;
 mod theme;
+mod toast_chrome;
 mod toasts;
 mod tree;
 mod watch;
