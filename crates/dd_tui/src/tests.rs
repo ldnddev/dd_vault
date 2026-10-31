@@ -144,7 +144,7 @@ fn footer_follows_pane_mode_and_leader() {
     });
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  j/k: Move  Enter: Open  a: New  /: Filter  Ctrl+Q: Quit"
+        "F1: Help  F2: Theme  j/k: Move  Enter: Open  a: New  h/l: Folder  /: Filter  Ctrl+Q: Quit"
     );
     assert_eq!(
         app.footer_hint(60),
@@ -415,75 +415,74 @@ fn tree_lists_vault_dirs_hides_gitignore() {
 }
 
 #[test]
-fn tree_starts_collapsed_on_open() {
+fn tree_opens_at_vault_root() {
     let (_dir, app) = vault_app();
     let names: Vec<_> = app.tree.visible().iter().map(|r| r.name.clone()).collect();
+    assert!(app.tree.cwd.as_os_str().is_empty());
     assert!(names.iter().any(|n| n == "notes/"), "{names:?}");
     assert!(names.iter().any(|n| n == "assets/"), "{names:?}");
     assert!(
         !names
             .iter()
-            .any(|n| n == "hello.md" || n == "daily/" || n == "projects/"),
-        "nested rows should be hidden until a folder is expanded: {names:?}"
+            .any(|n| n == "hello.md" || n == "daily/" || n == "projects/" || n == ".."),
+        "the root lists only the top folder: {names:?}"
     );
-    assert!(app.tree.collapsed.contains(std::path::Path::new("notes")));
-    assert!(app
-        .tree
-        .collapsed
-        .contains(std::path::Path::new("notes/daily")));
-    assert!(app.tree.collapsed.contains(std::path::Path::new("assets")));
 }
 
 #[test]
-fn tree_reload_keeps_open_folders_and_collapses_new_ones() {
+fn tree_reload_stays_in_the_open_folder() {
     let (dir, mut app) = vault_app();
-    app.tree.collapsed.remove(std::path::Path::new("notes"));
+    let notes = app
+        .tree
+        .visible()
+        .iter()
+        .position(|r| r.name == "notes/")
+        .expect("notes");
+    app.tree.selected = notes;
+    app.tree.enter();
     let root = dir.path().join("notes");
     std::fs::create_dir_all(root.join("notes/archive/old")).unwrap();
     std::fs::write(root.join("notes/archive/old/x.md"), "x\n").unwrap();
     app.reload_tree();
     let names: Vec<_> = app.tree.visible().iter().map(|r| r.name.clone()).collect();
-    assert!(
-        names.iter().any(|n| n == "hello.md"),
-        "notes/ should stay expanded: {names:?}"
-    );
+    assert_eq!(app.tree.cwd, std::path::PathBuf::from("notes"));
+    assert!(names.iter().any(|n| n == "hello.md"), "{names:?}");
     assert!(
         names.iter().any(|n| n == "archive/"),
-        "new sibling dir should appear under the open folder: {names:?}"
+        "a new sibling appears in the open folder: {names:?}"
     );
     assert!(
         !names.iter().any(|n| n == "old/" || n == "x.md"),
-        "new folders should start collapsed: {names:?}"
+        "children of the new folder stay out of this listing: {names:?}"
     );
 }
 
 #[test]
 fn tree_jk_and_enter_opens_file() {
     let (_dir, mut app) = vault_app();
-    let names: Vec<String> = app.tree.visible().into_iter().map(|r| r.name).collect();
-    assert!(names.iter().any(|n| n == "notes/"));
-    send_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+    let notes = app
+        .tree
+        .visible()
+        .iter()
+        .position(|r| r.name == "notes/")
+        .expect("notes");
+    app.tree.selected = notes;
     send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    let selected = app.tree.selected_row().expect("row");
-    if selected.kind == dd_vault_core::NodeKind::Dir {
-        send_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
-        send_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
-        send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    }
-    let visible = app.tree.visible();
-    let hello = visible.iter().position(|r| r.name == "hello.md");
-    if let Some(i) = hello {
-        app.tree.selected = i;
-        send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(app.editor.rel.as_deref(), Some("notes/hello.md"));
-        assert_eq!(app.pane, Pane::Editor);
-    } else {
-        panic!("hello.md not visible: {visible:?}");
-    }
+    assert_eq!(app.tree.cwd, std::path::PathBuf::from("notes"));
+    let hello = app
+        .tree
+        .visible()
+        .iter()
+        .position(|r| r.name == "hello.md")
+        .expect("hello");
+    app.tree.selected = hello;
+    send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.editor.rel.as_deref(), Some("notes/hello.md"));
+    assert_eq!(app.pane, Pane::Editor);
 }
 
 #[test]
-fn tree_hl_collapses_and_expands() {
+fn tree_hl_enters_and_leaves() {
     let (_dir, mut app) = vault_app();
     let notes = app
         .tree
@@ -493,17 +492,23 @@ fn tree_hl_collapses_and_expands() {
         .expect("notes");
     app.tree.selected = notes;
     send_key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
-    let visible: Vec<_> = app.tree.visible().iter().map(|r| r.name.clone()).collect();
-    assert!(
-        !visible.iter().any(|n| n == "hello.md" || n == "daily/"),
-        "{visible:?}"
-    );
+    assert!(app.tree.cwd.as_os_str().is_empty());
     send_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
     let visible: Vec<_> = app.tree.visible().iter().map(|r| r.name.clone()).collect();
-    assert!(
-        visible.iter().any(|n| n == "daily/" || n == "hello.md"),
-        "{visible:?}"
+    assert_eq!(app.tree.cwd, std::path::PathBuf::from("notes"));
+    assert!(visible.iter().any(|n| n == ".."), "{visible:?}");
+    assert!(visible.iter().any(|n| n == "daily/"), "{visible:?}");
+    assert!(visible.iter().any(|n| n == "hello.md"), "{visible:?}");
+    assert!(!visible.iter().any(|n| n == "assets/"), "{visible:?}");
+    send_key(&mut app, KeyCode::Char('h'), KeyModifiers::NONE);
+    let visible: Vec<_> = app.tree.visible().iter().map(|r| r.name.clone()).collect();
+    assert!(app.tree.cwd.as_os_str().is_empty());
+    assert_eq!(
+        app.tree.selected_rel(),
+        Some(std::path::PathBuf::from("notes"))
     );
+    assert!(visible.iter().any(|n| n == "notes/"), "{visible:?}");
+    assert!(!visible.iter().any(|n| n == "hello.md"), "{visible:?}");
 }
 
 #[test]
@@ -516,6 +521,7 @@ fn tree_new_file_and_delete() {
         .position(|r| r.name == "notes/")
         .expect("notes");
     app.tree.selected = notes;
+    send_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
     send_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
     assert!(matches!(app.modal, Some(Modal::Prompt { .. })));
     for c in ['s', 'p', 'a', 'r', 'k'] {
@@ -548,18 +554,30 @@ fn tree_new_file_and_delete() {
 #[test]
 fn tree_filter_narrows_rows() {
     let (_dir, mut app) = vault_app();
+    let notes = app
+        .tree
+        .visible()
+        .iter()
+        .position(|r| r.name == "notes/")
+        .expect("notes");
+    app.tree.selected = notes;
     send_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
     assert!(app.tree.filtering);
     for c in ['h', 'e', 'l', 'l', 'o'] {
         send_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
     }
     let names: Vec<_> = app.tree.visible().iter().map(|r| r.name.clone()).collect();
-    assert!(names.iter().any(|n| n == "hello.md"), "{names:?}");
-    assert!(names.iter().any(|n| n == "notes/"), "{names:?}");
-    assert!(!names.iter().any(|n| n == "assets/"), "{names:?}");
+    assert!(names.iter().any(|n| n == "notes/hello.md"), "{names:?}");
+    assert!(!names.iter().any(|n| n.contains("assets")), "{names:?}");
     send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     assert!(!app.tree.filtering);
     assert!(app.tree.filter.is_empty());
+    assert_eq!(
+        app.tree.selected_rel(),
+        Some(std::path::PathBuf::from("notes"))
+    );
+    let names: Vec<_> = app.tree.visible().iter().map(|r| r.name.clone()).collect();
+    assert!(names.iter().any(|n| n == "assets/"), "{names:?}");
 }
 
 #[test]
@@ -1920,26 +1938,84 @@ fn session_restores_note_caret_and_zen() {
     assert_eq!(app2.editor.cursor(), 3);
     assert!(app2.zen);
     assert_eq!(app2.pane, Pane::Editor);
-    assert!(
-        !app2.tree.collapsed.contains(std::path::Path::new("notes")),
-        "session restore reveals the open note"
+    assert_eq!(
+        app2.tree.cwd,
+        std::path::PathBuf::from("notes"),
+        "session restore opens the note's folder"
     );
     assert!(app2.tree.visible().iter().any(|r| r.name == "hello.md"));
+    assert!(!app2.tree.visible().iter().any(|r| r.name == "assets/"));
 }
 
 #[test]
-fn reveal_expands_collapsed_ancestors() {
-    let (_dir, mut app) = vault_app();
-    app.tree.collapsed.insert(std::path::PathBuf::from("notes"));
+fn reveal_opens_the_parent_folder() {
+    let (dir, mut app) = vault_app();
     app.open_file(std::path::PathBuf::from("notes/hello.md"));
-    assert!(
-        !app.tree.collapsed.contains(std::path::Path::new("notes")),
-        "notes/ should be expanded"
-    );
+    assert_eq!(app.tree.cwd, std::path::PathBuf::from("notes"));
     assert_eq!(
         app.tree.selected_rel(),
         Some(std::path::PathBuf::from("notes/hello.md"))
     );
+    let daily = dir.path().join("notes/notes/daily");
+    std::fs::write(daily.join("x.md"), "# x\n").unwrap();
+    app.reload_tree();
+    app.open_file(std::path::PathBuf::from("notes/daily/x.md"));
+    assert_eq!(app.tree.cwd, std::path::PathBuf::from("notes/daily"));
+    assert!(app.tree.visible().iter().any(|r| r.name == "x.md"));
+    assert!(!app.tree.visible().iter().any(|r| r.name == "hello.md"));
+}
+
+#[test]
+fn tree_long_name_keeps_start_and_extension() {
+    let (dir, mut app) = vault_app();
+    let long = "2026-10-31-client-workshop-notes.md";
+    std::fs::write(dir.path().join("notes/notes").join(long), "# x\n").unwrap();
+    app.reload_tree();
+    let notes = app
+        .tree
+        .visible()
+        .iter()
+        .position(|r| r.name == "notes/")
+        .expect("notes");
+    app.tree.selected = notes;
+    app.tree.enter();
+    let idx = app
+        .tree
+        .visible()
+        .iter()
+        .position(|r| r.name == long)
+        .expect("long note");
+    app.tree.selected = idx;
+    app.tree_split = 18;
+    let text = buffer_text(&mut app, 100, 24);
+    let budget = crate::tree::name_column_budget(
+        app.tree_inner.width,
+        app.tree_inner.height,
+        app.tree.visible().len(),
+    );
+    let shown = crate::tree::middle_ellipsis(long, budget);
+    assert!(
+        shown.starts_with("2026-") && shown.ends_with("notes.md") && shown.contains('…'),
+        "{shown} budget {budget}"
+    );
+    assert!(text.contains(&shown), "{text}");
+    assert!(!text.contains(long), "{text}");
+}
+
+#[test]
+fn middle_ellipsis_keeps_extension() {
+    let name = "2026-10-31-client-workshop-notes.md";
+    assert_eq!(
+        crate::tree::middle_ellipsis(name, 21),
+        "2026-10-31-c…notes.md"
+    );
+    assert_eq!(crate::tree::middle_ellipsis("hello.md", 21), "hello.md");
+    assert_eq!(
+        crate::tree::left_ellipsis("notes/projects/client", 12),
+        "…/client"
+    );
+    assert_eq!(crate::tree::name_column_budget(20, 5, 10), 17);
+    assert_eq!(crate::tree::name_column_budget(20, 5, 3), 18);
 }
 
 #[test]

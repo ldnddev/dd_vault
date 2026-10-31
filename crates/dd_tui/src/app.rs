@@ -1145,7 +1145,13 @@ impl App {
             return fit_footer(width, &left, middle, &[quit]);
         }
         let middle: &[&str] = match self.pane {
-            Pane::Tree => &["j/k: Move", "Enter: Open", "a: New", "/: Filter"],
+            Pane::Tree => &[
+                "j/k: Move",
+                "Enter: Open",
+                "a: New",
+                "h/l: Folder",
+                "/: Filter",
+            ],
             Pane::Preview => &["j/k: Scroll", "g/G: Ends", "Ctrl+click: Open"],
             Pane::Editor => match self.editor.mode {
                 dd_edit::Mode::Insert => &["Esc: Normal", "Ctrl+S: Save", "[[: Link"],

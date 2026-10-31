@@ -60,7 +60,7 @@ struct ViewTick {
     tree_scroll: usize,
     tree_filter: usize,
     tree_filtering: bool,
-    tree_collapsed: usize,
+    tree_cwd: String,
     preview_scroll: u16,
     preview_visible: bool,
     preview_read: bool,
@@ -135,7 +135,7 @@ impl ViewTick {
             tree_scroll: app.tree.scroll,
             tree_filter: app.tree.filter.len(),
             tree_filtering: app.tree.filtering,
-            tree_collapsed: app.tree.collapsed.len(),
+            tree_cwd: app.tree.cwd.display().to_string(),
             preview_scroll: app.preview_scroll,
             preview_visible: app.preview_visible,
             preview_read: app.preview_read,
@@ -562,11 +562,7 @@ fn map_edit_key(k: KeyEvent) -> Option<EditKey> {
 
 fn handle_filter_key(app: &mut App, k: KeyEvent) -> Result<()> {
     match k.code {
-        KeyCode::Esc => {
-            app.tree.filter.clear();
-            app.tree.filtering = false;
-            app.tree.selected = 0;
-        }
+        KeyCode::Esc => app.tree.cancel_filter(),
         KeyCode::Enter => {
             app.tree.filtering = false;
         }
@@ -649,12 +645,10 @@ fn handle_tree_key(app: &mut App, k: KeyEvent) {
         KeyCode::PageUp => app.tree.move_by(-10),
         KeyCode::Home | KeyCode::Char('g') => app.tree.jump_home(),
         KeyCode::End | KeyCode::Char('G') => app.tree.jump_end(),
-        KeyCode::Char('h') | KeyCode::Left => app.tree.collapse(),
-        KeyCode::Char('l') | KeyCode::Right => app.tree.expand(),
+        KeyCode::Char('h') | KeyCode::Left => app.tree.leave(),
+        KeyCode::Char('l') | KeyCode::Right => app.tree.enter(),
         KeyCode::Enter => app.tree_activate(),
-        KeyCode::Char('/') => {
-            app.tree.filtering = true;
-        }
+        KeyCode::Char('/') => app.tree.begin_filter(),
         KeyCode::Char('a') => app.begin_new_entry(),
         KeyCode::Char('r') => app.begin_rename(),
         KeyCode::Char('d') => app.begin_delete(),
@@ -706,12 +700,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                 let idx = app.tree.scroll + (m.row.saturating_sub(app.tree_inner.y)) as usize;
                 let rows = app.tree.visible();
                 if idx < rows.len() {
-                    let row = rows[idx].clone();
                     app.tree.selected = idx;
-                    let glyph = m.column < app.tree_inner.x.saturating_add(row.glyph_cols.max(2));
-                    if glyph && row.kind == dd_vault_core::NodeKind::Dir {
-                        app.tree.toggle_dir();
-                    }
                     let now = Instant::now();
                     if let Some((px, py, t0)) = app.last_click {
                         if px == m.column

@@ -1,6 +1,6 @@
 # dd_vault
 
-Keyboard-first, vim-flavored markdown vault TUI. Files on disk are the source of truth. Version 0.1.11. Linux and macOS. Rust 1.82+. MIT.
+Keyboard-first, vim-flavored markdown vault TUI. Files on disk are the source of truth. Version 0.1.12. Linux and macOS. Rust 1.82+. MIT.
 
 **Tutorial:** https://ldnddev.github.io/dd_vault/
 
@@ -13,7 +13,7 @@ dd_vault init ~/Notes && dd_vault open ~/Notes
 
 ## Using it
 
-The screen is a 3-row header, the body, and a 1-row footer. Tab moves Tree, Notes, Preview. The tree starts collapsed. `j`/`k` move, `h`/`l` fold a folder, Enter opens a file, `a`/`r`/`d` create, rename, and delete.
+The screen is a 3-row header, the body, and a 1-row footer. Tab moves Tree, Notes, Preview. The tree lists one folder at a time. `j`/`k` move, `l` or Enter opens a folder, `h` goes back, Enter on a file opens it, and `a`/`r`/`d` create, rename, and delete. `/` filters names across the vault. A long name keeps its start and its extension.
 
 The notes pane is a vim-style editor (normal, insert, visual, `:` commands) with word wrap, syntect highlighting, and undo. `y` / `yy` copy to the system clipboard. Ctrl+S saves. Ctrl+V pastes a clipboard image into `assets/` and inserts a markdown image. `gf` or Enter follows `[[wikilinks]]` and local markdown links. `gx`, Ctrl+Enter, and Ctrl+click open `http`, `https`, and `mailto` links in the default app.
 

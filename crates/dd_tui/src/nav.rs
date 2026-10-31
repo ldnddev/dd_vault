@@ -9,7 +9,6 @@ use crate::open_ext;
 use crate::app::{App, ConfirmKind, DiscardNext, JumpAction, Modal, NavigateTo, Pane};
 use crate::jump::Jump;
 use crate::toasts::ToastLevel;
-use crate::tree::TreeState;
 
 impl App {
     pub fn current_jump(&self) -> Option<Jump> {
@@ -512,18 +511,4 @@ fn visual_preview_line(
         vis += rows;
     }
     None
-}
-
-impl TreeState {
-    pub fn reveal(&mut self, rel: &Path) {
-        let mut p = rel.parent();
-        while let Some(dir) = p {
-            if dir.as_os_str().is_empty() {
-                break;
-            }
-            self.collapsed.remove(dir);
-            p = dir.parent();
-        }
-        self.select_rel(rel);
-    }
 }

@@ -7,7 +7,7 @@ use ratatui::Frame;
 use crate::app::{App, Modal, Pane, PreviewCache, PromptKind};
 use crate::help::{build_help_text, build_theme_text, count_wrapped_lines};
 use crate::toasts::render_toasts;
-use crate::tree::VisibleRow;
+use crate::tree::{middle_ellipsis, name_column_budget, tree_title_text, VisibleRow};
 use dd_vault_core::NodeKind;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -298,8 +298,12 @@ fn render_body(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     if app.tree_area.width > 0 {
-        let count = app.tree.visible().len();
-        let tree_title = tree_title(app, count);
+        let rows = app.tree.visible();
+        let count = rows.iter().filter(|row| row.name != "..").count();
+        let inner_w = app.tree_area.width.saturating_sub(2);
+        let inner_h = app.tree_area.height.saturating_sub(2);
+        let name_cols = name_column_budget(inner_w, inner_h, rows.len());
+        let tree_title = tree_title(app, count, &rows, name_cols, inner_w as usize);
         let tree_block = Block::default()
             .title(tree_title)
             .borders(Borders::ALL)
@@ -322,8 +326,7 @@ fn render_body(frame: &mut Frame, app: &mut App, area: Rect) {
                 .collect();
             frame.render_widget(Paragraph::new(lines), inner);
         } else {
-            let rows = app.tree.visible();
-            render_tree_rows(frame, app, inner, &rows);
+            render_tree_rows(frame, app, inner, &rows, name_cols);
             if rows.len() > height && height > 0 {
                 paint_scrollbar(
                     frame,
@@ -1346,30 +1349,53 @@ fn empty_vault_hint(inner_width: u16) -> Vec<&'static str> {
     }
 }
 
-fn tree_title(app: &App, count: usize) -> String {
-    let name = app
-        .vault
-        .as_ref()
-        .map(|v| v.name.as_str())
-        .unwrap_or("vault");
-    if app.tree.filtering || !app.tree.filter.is_empty() {
-        format!(" {name} /{} ({count}) ", app.tree.filter)
-    } else if app.vault.is_some() {
-        format!(" {name} ({count}) ")
+fn tree_title(
+    app: &App,
+    count: usize,
+    rows: &[VisibleRow],
+    name_cols: usize,
+    width: usize,
+) -> String {
+    let Some(vault) = app.vault.as_ref() else {
+        return tree_title_text("vault", "", None, None, width);
+    };
+    let label = if app.tree.cwd.as_os_str().is_empty() {
+        vault.name.clone()
     } else {
-        format!(" {name} ")
-    }
+        format!("/{}", app.tree.cwd.display())
+    };
+    let clipped = rows.get(app.tree.selected).and_then(|row| {
+        if row.name == ".." || row.name.chars().count() <= name_cols {
+            None
+        } else {
+            Some(row.rel.display().to_string())
+        }
+    });
+    tree_title_text(
+        &label,
+        &app.tree.filter,
+        clipped.as_deref(),
+        Some(count),
+        width,
+    )
 }
 
-fn render_tree_rows(frame: &mut Frame, app: &App, inner: Rect, rows: &[VisibleRow]) {
+fn render_tree_rows(
+    frame: &mut Frame,
+    app: &App,
+    inner: Rect,
+    rows: &[VisibleRow],
+    name_cols: usize,
+) {
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
         .map(|(i, row)| {
+            let name = middle_ellipsis(&row.name, name_cols);
             let selected = i == app.tree.selected && app.pane == Pane::Tree;
             if selected {
                 Line::from(Span::styled(
-                    format!("{}{}", row.prefix, row.name),
+                    format!("{}{name}", row.prefix),
                     Style::default()
                         .fg(app.theme.text_active_focus)
                         .bg(app.theme.selected_background),
@@ -1385,7 +1411,7 @@ fn render_tree_rows(frame: &mut Frame, app: &App, inner: Rect, rows: &[VisibleRo
                         row.prefix.clone(),
                         Style::default().fg(app.theme.text_secondary),
                     ),
-                    Span::styled(row.name.clone(), Style::default().fg(color)),
+                    Span::styled(name, Style::default().fg(color)),
                 ])
             }
         })

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use dd_vault_core::{walk_tree, FsNode, NodeKind, Vault};
@@ -9,43 +8,39 @@ pub struct VisibleRow {
     pub name: String,
     pub kind: NodeKind,
     pub prefix: String,
-    pub glyph_cols: u16,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct TreeState {
     pub roots: Vec<FsNode>,
-    pub collapsed: HashSet<PathBuf>,
+    /// Folder whose children fill the pane. Empty is the vault root.
+    pub cwd: PathBuf,
     pub selected: usize,
     pub scroll: usize,
     pub filter: String,
     pub filtering: bool,
+    /// Selection to restore when a vault-wide filter is cancelled.
+    filter_anchor: Option<PathBuf>,
 }
 
 impl TreeState {
     pub fn load(vault: &Vault) -> Self {
-        let roots = walk_tree(&vault.root).unwrap_or_default();
-        let collapsed = all_dir_rels(&roots);
         Self {
-            roots,
-            collapsed,
+            roots: walk_tree(&vault.root).unwrap_or_default(),
+            cwd: PathBuf::new(),
             selected: 0,
             scroll: 0,
             filter: String::new(),
             filtering: false,
+            filter_anchor: None,
         }
     }
 
     pub fn reload(&mut self, vault: &Vault) {
         let keep = self.selected_rel();
-        let mut expanded = all_dir_rels(&self.roots);
-        expanded.retain(|p| !self.collapsed.contains(p));
+        let cwd = self.cwd.clone();
         self.roots = walk_tree(&vault.root).unwrap_or_default();
-        let mut collapsed = all_dir_rels(&self.roots);
-        for p in &expanded {
-            collapsed.remove(p);
-        }
-        self.collapsed = collapsed;
+        self.cwd = self.resolve_cwd(&cwd);
         if let Some(rel) = keep {
             self.select_rel(&rel);
         } else {
@@ -54,22 +49,39 @@ impl TreeState {
     }
 
     pub fn visible(&self) -> Vec<VisibleRow> {
+        if !self.filter.is_empty() {
+            let mut out = Vec::new();
+            collect_matches(&self.roots, &self.filter, &mut out);
+            out.sort_by(|a, b| {
+                let dir_a = a.kind == NodeKind::Dir;
+                let dir_b = b.kind == NodeKind::Dir;
+                dir_b.cmp(&dir_a).then_with(|| {
+                    a.name
+                        .to_lowercase()
+                        .cmp(&b.name.to_lowercase())
+                        .then_with(|| a.rel.cmp(&b.rel))
+                })
+            });
+            return out;
+        }
         let mut out = Vec::new();
-        let filter = if self.filter.is_empty() {
-            None
-        } else {
-            Some(self.filter.as_str())
-        };
-        let filtering = filter.is_some();
-        flatten(
-            &self.roots,
-            &self.collapsed,
-            filter,
-            filtering,
-            &[],
-            0,
-            &mut out,
-        );
+        if !self.cwd.as_os_str().is_empty() {
+            let parent = self
+                .cwd
+                .parent()
+                .map(Path::to_path_buf)
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_default();
+            out.push(VisibleRow {
+                rel: parent,
+                name: "..".to_string(),
+                kind: NodeKind::Dir,
+                prefix: "  ".to_string(),
+            });
+        }
+        for node in children_of(&self.roots, &self.cwd) {
+            out.push(row_for(node, false));
+        }
         out
     }
 
@@ -144,146 +156,264 @@ impl TreeState {
         }
     }
 
-    pub fn toggle_dir(&mut self) {
+    /// Open the selected folder as the pane's listing.
+    pub fn enter(&mut self) {
         let Some(row) = self.selected_row() else {
             return;
         };
-        if row.kind != NodeKind::Dir {
+        if row.name == ".." || row.kind != NodeKind::Dir {
             return;
         }
-        if !self.collapsed.remove(&row.rel) {
-            self.collapsed.insert(row.rel);
+        let dest = row.rel.clone();
+        self.dismiss_filter();
+        self.cwd = dest;
+        self.selected = 0;
+        self.scroll = 0;
+    }
+
+    /// Return to the parent folder and select the one we left.
+    /// While a filter is showing, this cancels the filter instead.
+    pub fn leave(&mut self) {
+        if self.filtering || !self.filter.is_empty() {
+            self.cancel_filter();
+            return;
+        }
+        if self.cwd.as_os_str().is_empty() {
+            return;
+        }
+        let current = self.cwd.clone();
+        self.cwd = current
+            .parent()
+            .map(Path::to_path_buf)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_default();
+        self.scroll = 0;
+        self.selected = 0;
+        self.select_rel(&current);
+    }
+
+    /// Show `rel` in its parent folder. Used when a note is opened.
+    pub fn reveal(&mut self, rel: &Path) {
+        let parent = rel
+            .parent()
+            .map(Path::to_path_buf)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_default();
+        self.cwd = self.resolve_cwd(&parent);
+        self.scroll = 0;
+        self.select_rel(rel);
+    }
+
+    pub fn begin_filter(&mut self) {
+        if self.filter.is_empty() {
+            self.filter_anchor = self.selected_rel();
+        }
+        self.filtering = true;
+    }
+
+    pub fn cancel_filter(&mut self) {
+        let anchor = self.filter_anchor.take();
+        self.filter.clear();
+        self.filtering = false;
+        self.scroll = 0;
+        if let Some(rel) = anchor {
+            self.select_rel(&rel);
+        } else {
+            self.selected = 0;
         }
     }
 
-    pub fn collapse(&mut self) {
-        let Some(row) = self.selected_row() else {
-            return;
-        };
-        if row.kind == NodeKind::Dir && !self.collapsed.contains(&row.rel) {
-            self.collapsed.insert(row.rel);
-            return;
-        }
-        if let Some(parent) = row.rel.parent() {
-            if !parent.as_os_str().is_empty() {
-                self.collapsed.insert(parent.to_path_buf());
-                self.select_rel(parent);
-            }
-        }
-    }
-
-    pub fn expand(&mut self) {
-        let Some(row) = self.selected_row() else {
-            return;
-        };
-        if row.kind == NodeKind::Dir {
-            self.collapsed.remove(&row.rel);
-        }
+    pub fn dismiss_filter(&mut self) {
+        self.filter.clear();
+        self.filtering = false;
+        self.filter_anchor = None;
     }
 
     pub fn parent_rel_for_new(&self) -> PathBuf {
-        match self.selected_row() {
-            Some(row) if row.kind == NodeKind::Dir => row.rel,
-            Some(row) => row
-                .rel
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .map(Path::to_path_buf)
-                .unwrap_or_default(),
+        self.cwd.clone()
+    }
+
+    fn resolve_cwd(&self, cwd: &Path) -> PathBuf {
+        if cwd.as_os_str().is_empty() {
+            return PathBuf::new();
+        }
+        if find_node(&self.roots, cwd).is_some_and(|node| node.is_dir()) {
+            return cwd.to_path_buf();
+        }
+        match cwd.parent() {
+            Some(parent) => self.resolve_cwd(parent),
             None => PathBuf::new(),
         }
     }
 }
 
-fn all_dir_rels(nodes: &[FsNode]) -> HashSet<PathBuf> {
-    let mut out = HashSet::new();
-    collect_dir_rels(nodes, &mut out);
+fn children_of<'a>(nodes: &'a [FsNode], cwd: &Path) -> &'a [FsNode] {
+    if cwd.as_os_str().is_empty() {
+        return nodes;
+    }
+    find_node(nodes, cwd)
+        .map(|node| node.children.as_slice())
+        .unwrap_or(&[])
+}
+
+fn find_node<'a>(nodes: &'a [FsNode], rel: &Path) -> Option<&'a FsNode> {
+    for node in nodes {
+        if node.rel == rel {
+            return Some(node);
+        }
+        if node.is_dir() && rel.starts_with(&node.rel) {
+            if let Some(found) = find_node(&node.children, rel) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn collect_matches(nodes: &[FsNode], query: &str, out: &mut Vec<VisibleRow>) {
+    let q = query.to_lowercase();
+    for node in nodes {
+        if node.name.to_lowercase().contains(&q) {
+            out.push(row_for(node, true));
+        }
+        if node.is_dir() {
+            collect_matches(&node.children, query, out);
+        }
+    }
+}
+
+fn row_for(node: &FsNode, full_path: bool) -> VisibleRow {
+    let mut name = if full_path {
+        node.rel.display().to_string()
+    } else {
+        node.name.clone()
+    };
+    if node.is_dir() && !name.ends_with('/') {
+        name.push('/');
+    }
+    VisibleRow {
+        rel: node.rel.clone(),
+        name,
+        kind: node.kind,
+        prefix: if node.is_dir() {
+            "▸ ".to_string()
+        } else {
+            "  ".to_string()
+        },
+    }
+}
+
+/// Columns left for a row label after the 2-column marker and an optional scrollbar.
+pub(crate) fn name_column_budget(inner_width: u16, inner_height: u16, rows: usize) -> usize {
+    let scroll = if inner_height > 0 && rows > inner_height as usize {
+        1
+    } else {
+        0
+    };
+    inner_width.saturating_sub(2).saturating_sub(scroll) as usize
+}
+
+/// Keep the start of `name` and a short tail (the extension, when there is one).
+pub(crate) fn middle_ellipsis(name: &str, width: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if width == 0 {
+        return String::new();
+    }
+    if chars.len() <= width {
+        return name.to_string();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    let suffix = extension_len(&chars);
+    let preferred = 8.max(suffix);
+    let max_right = width - 2;
+    let mut right = preferred.min(max_right);
+    if suffix > 0 && right < suffix && suffix <= max_right {
+        right = suffix;
+    }
+    if right + 1 >= width {
+        let mut out: String = chars.iter().take(width - 1).collect();
+        out.push('…');
+        return out;
+    }
+    let left = width - 1 - right;
+    let mut out: String = chars.iter().take(left).collect();
+    out.push('…');
+    out.extend(chars[chars.len() - right..].iter());
     out
 }
 
-fn collect_dir_rels(nodes: &[FsNode], out: &mut HashSet<PathBuf>) {
-    for n in nodes {
-        if n.is_dir() {
-            out.insert(n.rel.clone());
-            collect_dir_rels(&n.children, out);
-        }
+fn extension_len(chars: &[char]) -> usize {
+    if chars.last() == Some(&'/') {
+        return 1;
+    }
+    match chars.iter().rposition(|c| *c == '.') {
+        Some(dot) if dot > 0 => chars.len() - dot,
+        _ => 0,
     }
 }
 
-fn flatten(
-    nodes: &[FsNode],
-    collapsed: &HashSet<PathBuf>,
-    filter: Option<&str>,
-    filtering: bool,
-    ancestors_last: &[bool],
-    depth: usize,
-    out: &mut Vec<VisibleRow>,
-) {
-    let visible: Vec<&FsNode> = nodes
+/// Shorten `text` from the left. A tail that contains `/` starts at that segment.
+pub(crate) fn left_ellipsis(text: &str, width: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if width == 0 {
+        return String::new();
+    }
+    if chars.len() <= width {
+        return text.to_string();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    let start = chars.len() - (width - 1);
+    let snap = chars[start..]
         .iter()
-        .filter(|n| filter.map(|q| n.matches_filter(q)).unwrap_or(true))
-        .collect();
-    let n = visible.len();
-    for (i, node) in visible.iter().enumerate() {
-        let is_last = i + 1 == n;
-        let expanded = node.is_dir() && (filtering || !collapsed.contains(&node.rel));
-        let prefix = build_prefix(ancestors_last, is_last, depth, node.is_dir(), expanded);
-        let glyph_cols = prefix.chars().count() as u16;
-        let mut name = node.name.clone();
-        if node.is_dir() && !name.ends_with('/') {
-            name.push('/');
-        }
-        out.push(VisibleRow {
-            rel: node.rel.clone(),
-            name,
-            kind: node.kind,
-            prefix,
-            glyph_cols,
-        });
-        if node.is_dir() && expanded {
-            let mut next = ancestors_last.to_vec();
-            next.push(is_last);
-            flatten(
-                &node.children,
-                collapsed,
-                filter,
-                filtering,
-                &next,
-                depth + 1,
-                out,
-            );
-        }
-    }
+        .position(|c| *c == '/')
+        .filter(|i| *i > 0)
+        .unwrap_or(0);
+    let mut out = String::from("…");
+    out.extend(chars[start + snap..].iter());
+    out
 }
 
-fn build_prefix(
-    ancestors_last: &[bool],
-    is_last: bool,
-    depth: usize,
-    is_dir: bool,
-    expanded: bool,
+/// Pane title. `count` is `None` when no vault is open.
+/// `clipped_rel` is the selected path when its label does not fit in the row.
+pub(crate) fn tree_title_text(
+    label: &str,
+    filter: &str,
+    clipped_rel: Option<&str>,
+    count: Option<usize>,
+    width: usize,
 ) -> String {
-    let mut s = String::new();
-    if depth == 0 {
-        if is_dir {
-            s.push_str(if expanded { "▾ " } else { "▸ " });
-        } else {
-            s.push_str("  ");
-        }
-        return s;
+    if width == 0 {
+        return String::new();
     }
-    for (i, last) in ancestors_last.iter().enumerate() {
-        if i == 0 {
-            s.push_str("  ");
-        } else {
-            s.push_str(if *last { "   " } else { "│  " });
-        }
+    let count_s = match count {
+        Some(n) => format!(" ({n})"),
+        None => String::new(),
+    };
+    let filter_s = if filter.is_empty() {
+        String::new()
+    } else {
+        format!(" /{filter}")
+    };
+    let body = if let Some(rel) = clipped_rel {
+        format!("{label}{filter_s} · {rel}")
+    } else {
+        format!("{label}{filter_s}")
+    };
+    let raw = format!(" {body}{count_s} ");
+    if raw.chars().count() <= width {
+        return raw;
     }
-    s.push_str(if is_last { "└─ " } else { "├─ " });
-    if is_dir {
-        s.push_str(if expanded { "▾ " } else { "▸ " });
+    let suffix = format!("{count_s} ");
+    let suffix_len = suffix.chars().count();
+    if suffix_len >= width {
+        return left_ellipsis(raw.trim(), width);
     }
-    s
+    let body_room = (width - suffix_len).saturating_sub(1);
+    format!(" {}{suffix}", left_ellipsis(&body, body_room))
 }
 
 use crate::app::{App, ConfirmKind, Modal, PromptKind};
@@ -304,10 +434,16 @@ impl App {
         let Some(row) = self.tree.selected_row() else {
             return;
         };
+        if row.name == ".." {
+            self.tree.leave();
+            return;
+        }
         match row.kind {
-            CoreKind::Dir => self.tree.toggle_dir(),
+            CoreKind::Dir => self.tree.enter(),
             CoreKind::File | CoreKind::Symlink => {
-                self.open_file(row.rel);
+                let rel = row.rel.clone();
+                self.tree.dismiss_filter();
+                self.open_file(rel);
             }
         }
     }
@@ -328,6 +464,9 @@ impl App {
         let Some(row) = self.tree.selected_row() else {
             return;
         };
+        if row.name == ".." {
+            return;
+        }
         self.modal = Some(Modal::Prompt {
             kind: PromptKind::Rename {
                 rel: row.rel.clone(),
@@ -344,6 +483,9 @@ impl App {
         let Some(row) = self.tree.selected_row() else {
             return;
         };
+        if row.name == ".." {
+            return;
+        }
         let kind = if row.kind == CoreKind::Dir {
             "folder"
         } else {
@@ -396,8 +538,8 @@ impl App {
                         Ok(_) => {
                             self.modal = None;
                             self.reload_tree();
-                            self.tree.collapsed.remove(&parent);
-                            self.tree.select_rel(&rel);
+                            self.tree.dismiss_filter();
+                            self.tree.reveal(&rel);
                             if !is_dir {
                                 self.open_file(rel.clone());
                             }
@@ -436,7 +578,8 @@ impl App {
                         }
                         self.modal = None;
                         self.reload_tree();
-                        self.tree.select_rel(&new_rel);
+                        self.tree.dismiss_filter();
+                        self.tree.reveal(&new_rel);
                         self.refresh_git();
                         self.push_toast(
                             ToastLevel::Success,
