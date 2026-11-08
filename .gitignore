@@ -1,4 +1,5 @@
 /target
+/crates/dd_gpui/target
 **/*.rs.bk
 .DS_Store
 *.db

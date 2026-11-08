@@ -1,6 +1,8 @@
 # dd_vault
 
-Keyboard-first, vim-flavored markdown vault TUI. Files on disk are the source of truth. Version 0.1.12. Linux and macOS. Rust 1.82+. MIT.
+Keyboard-first, vim-flavored markdown vault. Two programs share one vault on disk: `dd_vault` in the terminal, and `dd_vault-gui` in a desktop window. Files on disk are the source of truth. Version 0.1.13. Linux and macOS. MIT.
+
+The terminal app builds with Rust 1.82 or newer. The desktop window needs Rust 1.92 or newer, Vulkan (`libvulkan1` and a driver), and Wayland or X11. The tutorial screenshots are the terminal.
 
 **Tutorial:** https://ldnddev.github.io/dd_vault/
 
@@ -9,7 +11,11 @@ curl -fsSL https://raw.githubusercontent.com/ldnddev/dd_vault/main/install.sh | 
 dd_vault init ~/Notes && dd_vault open ~/Notes
 ```
 
-`install.sh` builds with `cargo build --release --locked` and installs to `~/.local/bin` (`PREFIX` overrides the root). With no arguments, `dd_vault` opens the last vault from `~/.config/ldnddev/vaults.toml`, or a picker. `dd_vault init [path]` creates `notes/`, `notes/daily/`, `notes/projects/`, `assets/`, `.gitignore`, and `.dd_vault-<name>/`. `dd_vault --reindex [path]` rebuilds the search index and exits.
+`install.sh` builds the terminal app with `cargo build --release --locked` and installs `dd_vault` to `~/.local/bin` (`PREFIX` overrides the root). Set `INSTALL_GUI=1` to also install `dd_vault-gui`. See [docs/INSTALL.md](docs/INSTALL.md). With no arguments, `dd_vault` opens the last vault from `~/.config/ldnddev/vaults.toml`, or a picker. `dd_vault init [path]` creates `notes/`, `notes/daily/`, `notes/projects/`, `assets/`, `.gitignore`, and `.dd_vault-<name>/`. `dd_vault --reindex [path]` rebuilds the search index and exits.
+
+## Desktop window
+
+`dd_vault-gui` uses the same keys, theme file, and `session.toml` as the terminal. F1 is help. F2 lists Omarchy themes. `<Space>h` is zen, `<Space>z` hides the tree, `<Space>e` shows it. Drag a pane border to resize. The footer keeps F1, F2, and quit. Transient messages are toasts above that footer. The default install does not build this program.
 
 ## Using it
 
@@ -101,6 +107,11 @@ flowchart TB
     tuiTests["tests.rs · snapshots/"]
   end
 
+  subgraph gpui [crates/dd_gpui]
+    guiBin["dd_vault-gui"]
+    guiShell["shell.rs · chrome.rs"]
+  end
+
   subgraph edit [crates/dd_edit]
     editLib["lib.rs · keys.rs · error.rs · tests.rs"]
   end
@@ -126,6 +137,7 @@ flowchart TB
   root --> docsDir
   root --> core
   root --> tui
+  root --> gpui
   root --> edit
   root --> render
   root --> aiCrate

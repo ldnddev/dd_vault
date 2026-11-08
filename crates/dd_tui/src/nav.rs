@@ -2,12 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
-use dd_vault_core::{is_external_url, link_at, wikilink_new_rel, Session};
+use dd_vault_core::{
+    external_open_target, is_external_url, link_at, wikilink_new_rel, Jump, Session,
+};
 
 use crate::open_ext;
 
 use crate::app::{App, ConfirmKind, DiscardNext, JumpAction, Modal, NavigateTo, Pane};
-use crate::jump::Jump;
 use crate::toasts::ToastLevel;
 
 impl App {
@@ -289,35 +290,16 @@ impl App {
             .next()
             .unwrap_or(raw)
             .trim();
-        if dst.is_empty() {
-            return Err("No link under the caret".into());
-        }
-        if is_external_url(dst) {
-            return Ok(dst.to_string());
-        }
-        let Some(vault) = &self.vault else {
-            return Err("No vault open".into());
+        let resolved = if dst.is_empty() || is_external_url(dst) {
+            None
+        } else {
+            self.resolve_link_path(dst)
         };
-        let Some(rel) = self.resolve_link_path(dst) else {
-            return Err(format!("No file for {dst}"));
-        };
-        if rel.is_absolute()
-            || rel
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Err("That link points outside the vault".into());
-        }
-        let abs = vault.root.join(&rel);
-        if !abs.is_file() {
-            return Err(format!("{} is not a file", rel.display()));
-        }
-        let root = vault.root.canonicalize().map_err(|err| err.to_string())?;
-        let canon = abs.canonicalize().map_err(|err| err.to_string())?;
-        if !canon.starts_with(&root) {
-            return Err("That link points outside the vault".into());
-        }
-        Ok(canon.display().to_string())
+        external_open_target(
+            self.vault.as_ref().map(|vault| vault.root.as_path()),
+            resolved.as_deref(),
+            raw,
+        )
     }
 
     fn preview_target_at(&self, x: u16, y: u16) -> Option<String> {

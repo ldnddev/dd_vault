@@ -309,11 +309,30 @@ mod tests {
         assert!(!theme.header_quotes.is_empty());
     }
 
+    /// A color file with no Omarchy link. The shared theme YAML links
+    /// `retro-82`, so copying it would replace this background with the
+    /// live desktop theme.
+    fn strict_color_file(background: &str) -> String {
+        let mut yaml = String::from("version: 1\ncolors:\n");
+        for field in ldnddev_theme::COLOR_FIELDS {
+            let hex = if field.key == "base_background" {
+                background
+            } else {
+                "#010203"
+            };
+            yaml.push_str(&format!("  {}: \"{hex}\"\n", field.key));
+        }
+        yaml
+    }
+
     #[test]
     fn local_theme_wins() {
         let dir = tempfile::tempdir().expect("tmp");
-        let yaml = BUILTIN_YAML.replace("#0F1114", "#112233");
-        fs::write(dir.path().join(THEME_FILENAME), yaml).expect("write");
+        fs::write(
+            dir.path().join(THEME_FILENAME),
+            strict_color_file("#112233"),
+        )
+        .expect("write");
         let loaded = AppTheme::load_from(dir.path(), None);
         assert!(loaded.warning.is_none());
         assert_eq!(loaded.theme.source, ThemeSource::Local);
@@ -333,10 +352,13 @@ mod tests {
     fn global_used_when_local_missing() {
         let project = tempfile::tempdir().expect("project");
         let xdg = tempfile::tempdir().expect("xdg");
-        let yaml = BUILTIN_YAML.replace("#0F1114", "#ABCDEF");
         let global_dir = xdg.path().join("ldnddev");
         fs::create_dir_all(&global_dir).expect("mkdir");
-        fs::write(global_dir.join(THEME_FILENAME), yaml).expect("write");
+        fs::write(
+            global_dir.join(THEME_FILENAME),
+            strict_color_file("#ABCDEF"),
+        )
+        .expect("write");
         let loaded = AppTheme::load_from(project.path(), Some(xdg.path()));
         assert_eq!(loaded.theme.source, ThemeSource::Global);
         assert_eq!(color_to_hex(loaded.theme.base_background), "#ABCDEF");

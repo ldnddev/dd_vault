@@ -6,6 +6,8 @@ mod error;
 mod fs_ops;
 mod git;
 mod index;
+mod jump;
+mod open_ext;
 mod parse;
 mod paths;
 mod registry;
@@ -13,6 +15,7 @@ mod reindex;
 mod session;
 mod skip;
 mod tree;
+mod tree_state;
 mod vault;
 
 pub use config::VaultConfig;
@@ -28,6 +31,8 @@ pub use git::{
     GitState, GitStatus, BUILTIN_SECRET_NEEDLES,
 };
 pub use index::{FileHit, Index};
+pub use jump::{Jump, JumpList};
+pub use open_ext::{external_open_target, launch_default_app};
 pub use parse::{
     is_external_url, link_at, located_links, parse_note, LinkKind, LocatedLink, ParsedLink,
     ParsedNote,
@@ -38,6 +43,9 @@ pub use reindex::{reindex, ReindexReport};
 pub use session::Session;
 pub use skip::{skip_dir_name, skip_entry_name, skip_file_name};
 pub use tree::{walk_tree, FsNode, NodeKind};
+pub use tree_state::{
+    left_ellipsis, middle_ellipsis, name_column_budget, tree_title_text, TreeState, VisibleRow,
+};
 pub use vault::{init, open, Vault, DEFAULT_VAULT_CONFIG, GITIGNORE};
 
 #[cfg(test)]

@@ -12,7 +12,8 @@ use crossterm::terminal::{
 use dd_edit::{Action, Editor};
 use dd_render::PreviewPalette;
 use dd_vault_core::{
-    open, FileHit, GitOpResult, GitStatus, Index, Paths, Registry, ReindexReport, Vault,
+    open, FileHit, GitOpResult, GitStatus, Index, Jump, JumpList, Paths, Registry, ReindexReport,
+    Vault,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -20,7 +21,6 @@ use ratatui::text::Text;
 use ratatui::Terminal;
 
 use crate::ai::AiState;
-use crate::jump::{Jump, JumpList};
 use crate::theme::{choose_header_copy, AppTheme, ThemeLoad};
 use crate::toasts::{Toast, ToastLevel};
 use crate::tree::TreeState;

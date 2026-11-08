@@ -78,6 +78,59 @@ pub struct PreviewLink {
     pub target: String,
 }
 
+fn packed_rgb(color: u32) -> Color {
+    Color::Rgb((color >> 16) as u8, (color >> 8) as u8, color as u8)
+}
+
+/// Packed `0xRRGGBB` colors. Quote uses `muted`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PackedPreviewColors {
+    pub text: u32,
+    pub muted: u32,
+    pub heading: u32,
+    pub focus: u32,
+    pub link: u32,
+    pub code: u32,
+    pub success: u32,
+    pub warning: u32,
+    pub error: u32,
+    pub info: u32,
+    pub background: u32,
+}
+
+/// Build a preview palette from packed `0xRRGGBB` colors.
+pub fn palette_from_packed(colors: PackedPreviewColors) -> PreviewPalette {
+    PreviewPalette {
+        text: packed_rgb(colors.text),
+        muted: packed_rgb(colors.muted),
+        heading: packed_rgb(colors.heading),
+        focus: packed_rgb(colors.focus),
+        link: packed_rgb(colors.link),
+        code: packed_rgb(colors.code),
+        quote: packed_rgb(colors.muted),
+        success: packed_rgb(colors.success),
+        warning: packed_rgb(colors.warning),
+        error: packed_rgb(colors.error),
+        info: packed_rgb(colors.info),
+        background: packed_rgb(colors.background),
+    }
+}
+
+/// Foreground and modifiers for one preview span. The GUI uses this so it does
+/// not depend on ratatui just to read a color.
+pub fn style_parts(style: Style) -> (Option<(u8, u8, u8)>, bool, bool, bool) {
+    let color = match style.fg {
+        Some(Color::Rgb(r, g, b)) => Some((r, g, b)),
+        _ => None,
+    };
+    (
+        color,
+        style.add_modifier.contains(Modifier::BOLD),
+        style.add_modifier.contains(Modifier::ITALIC),
+        style.add_modifier.contains(Modifier::UNDERLINED),
+    )
+}
+
 struct PendingLink {
     start: usize,
     end: usize,

@@ -1,0 +1,68 @@
+# cargo-deny config for the dd_vault GPUI shell (MIT app, Apache-2.0 GPUI).
+# Run from this crate: cargo deny check
+# GPL stays refused. The root TUI workspace has its own deny.toml.
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+]
+all-features = false
+no-default-features = false
+
+[advisories]
+version = 2
+yanked = "warn"
+ignore = [
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 via syntect; same as the TUI highlighter; no safe upgrade" },
+    { id = "RUSTSEC-2024-0384", reason = "instant via notify; unmaintained, no safe upgrade on native" },
+    { id = "RUSTSEC-2024-0436", reason = "paste via image/exr/pulp inside GPUI 1.27.0; unmaintained, no upgrade on this pin" },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml via serde_yaml in ldnddev_theme; same as the TUI theme loader" },
+    { id = "RUSTSEC-2026-0009", reason = "time 0.3.45 via notify-rust mac notifications; GPUI 1.27.0 pins it; not used on vault input" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser via GPUI text/svg stack; unmaintained, no upgrade on this pin" },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.38 via zbus/accesskit inside GPUI 1.27.0; upgrade needs a newer GPUI pin" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml NsReader via zbus/accesskit inside GPUI 1.27.0; upgrade needs a newer GPUI pin" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz via GPUI text stack; unmaintained, no upgrade on this pin" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; GPUI 1.27.0 still uses the standalone crate" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; GPUI 1.27.0 still uses the standalone crate" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; GPUI 1.27.0 still uses the standalone crate" },
+    { id = "RUSTSEC-2026-0346", reason = "rustls 0.23.45 via dd_ai/reqwest; same TLS stack the TUI already carries; no upgrade in this phase" },
+    { id = "RUSTSEC-2026-0347", reason = "rustls 0.23.45 via dd_ai/reqwest; same TLS stack the TUI already carries; no upgrade in this phase" },
+    { id = "RUSTSEC-2026-0348", reason = "rustls 0.23.45 via dd_ai/reqwest; same TLS stack the TUI already carries; no upgrade in this phase" },
+    { id = "RUSTSEC-2026-0349", reason = "rustls 0.23.45 via dd_ai/reqwest; same TLS stack the TUI already carries; no upgrade in this phase" },
+    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki via dd_ai/reqwest; same TLS stack the TUI already carries; no upgrade in this phase" },
+    { id = "RUSTSEC-2026-0381", reason = "webpki-roots via dd_ai/reqwest; same TLS stack the TUI already carries; no upgrade in this phase" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "BSL-1.0",
+    # webpki-roots via dd_ai/reqwest, same allow as the TUI workspace.
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+highlight = "all"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
