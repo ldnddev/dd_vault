@@ -211,3 +211,31 @@ fn picker_enter_applies_esc_reverts_and_e_edits() {
         "#0F1114"
     );
 }
+
+#[test]
+fn picker_motion_does_not_apply_preview_does_and_keeps_snapshot() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let root = dir.path();
+    fs::create_dir_all(root.join("stock/tokyo-night")).unwrap();
+    fs::write(root.join("stock/tokyo-night/colors.toml"), tokyo()).unwrap();
+    fs::create_dir_all(root.join("state/theme")).unwrap();
+    fs::write(root.join("state/theme.name"), "tokyo-night\n").unwrap();
+    fs::write(root.join("state/theme/colors.toml"), tokyo()).unwrap();
+    let paths = OmarchyPaths::from_root(root);
+    let mut picker = ThemePicker::new(Palette::builtin(), &[EXTRA_MODAL_HEADER], paths);
+    picker.select(1);
+    assert_eq!(picker.handle(EditorKey::Char('j')), PickerOutcome::None);
+    assert!(picker.palette.omarchy.is_none());
+    picker.select(1);
+    assert_eq!(picker.preview_selected(), PickerOutcome::Applied);
+    assert_eq!(
+        picker.palette.omarchy,
+        Some(OmarchyChoice::Theme("tokyo-night".into()))
+    );
+    assert!(picker.revert_palette().omarchy.is_none());
+    assert_eq!(picker.handle(EditorKey::Char('k')), PickerOutcome::None);
+    assert_eq!(
+        picker.palette.omarchy,
+        Some(OmarchyChoice::Theme("tokyo-night".into()))
+    );
+}

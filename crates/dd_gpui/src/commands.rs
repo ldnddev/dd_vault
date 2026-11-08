@@ -114,7 +114,7 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     },
     PaletteItem {
         id: "theme",
-        label: "Theme editor",
+        label: "Appearance",
         keys: "F2",
     },
     PaletteItem {

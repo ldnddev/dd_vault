@@ -1310,7 +1310,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "dd_ai"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "reqwest",
  "serde",
@@ -1321,7 +1321,7 @@ dependencies = [
 
 [[package]]
 name = "dd_edit"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "ropey",
  "thiserror 2.0.21",
@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "dd_gpui"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1343,11 +1343,12 @@ dependencies = [
  "ldnddev_theme",
  "notify",
  "syntect",
+ "toml 0.8.23",
 ]
 
 [[package]]
 name = "dd_render"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "comrak",
  "image",
@@ -1358,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "dd_vault_core"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "hex",
  "nucleo-matcher",

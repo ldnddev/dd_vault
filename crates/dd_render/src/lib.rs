@@ -7,10 +7,12 @@ use comrak::{parse_document, Arena, Options};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
+mod blocks;
 mod mermaid;
 mod table;
 mod term_image;
 
+pub use blocks::{render_markdown_blocks, BlockKind, MdBlock, MdRun};
 pub use mermaid::render_mermaid;
 pub use term_image::{decode_rgba, encode_png_rgba, looks_like_image, rgba_to_half_block};
 
@@ -241,7 +243,7 @@ fn commit_line(out: &mut Vec<Line<'static>>, spans: Vec<Span<'static>>, ctx: &Re
     out.push(Line::from(spans));
 }
 
-fn options() -> Options<'static> {
+pub(crate) fn options() -> Options<'static> {
     let mut options = Options::default();
     options.extension.strikethrough = true;
     options.extension.table = true;
@@ -253,7 +255,7 @@ fn options() -> Options<'static> {
     options
 }
 
-fn expand_embeds(src: &str, embed: Option<&EmbedResolver<'_>>) -> String {
+pub(crate) fn expand_embeds(src: &str, embed: Option<&EmbedResolver<'_>>) -> String {
     let Some(resolve) = embed else {
         return src.to_string();
     };
@@ -647,7 +649,7 @@ fn spans_are_blank(spans: &[Span<'_>]) -> bool {
     spans.iter().all(|s| s.content.trim().is_empty())
 }
 
-fn inline_plain<'a>(node: &'a AstNode<'a>) -> String {
+pub(crate) fn inline_plain<'a>(node: &'a AstNode<'a>) -> String {
     let mut s = String::new();
     for c in node.children() {
         match &c.data.borrow().value {
@@ -669,6 +671,75 @@ fn prefix_spans(indent: usize) -> Vec<Span<'static>> {
 
 fn blank() -> Line<'static> {
     Line::from("")
+}
+
+pub(crate) fn table_lines<'a>(node: &'a AstNode<'a>, width: u16) -> Vec<String> {
+    let mut out = Vec::new();
+    let ctx = plain_ctx(width, 1);
+    if let NodeValue::Table(table) = &node.data.borrow().value {
+        table::append(
+            node,
+            &ctx,
+            &mut out,
+            0,
+            &table.alignments,
+            table.num_columns,
+        );
+    }
+    plain_of(&out)
+}
+
+pub(crate) fn mermaid_lines(literal: &str, width: u16, cap: u16) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut ctx = plain_ctx(width, cap);
+    ctx.max_diagram_rows = cap.max(1);
+    emit_mermaid(&mut out, literal, &ctx, 0);
+    plain_of(&out)
+}
+
+fn plain_ctx(width: u16, diagrams: u16) -> RenderCtx<'static> {
+    let ink = Color::Rgb(255, 255, 255);
+    RenderCtx {
+        p: PreviewPalette {
+            text: ink,
+            muted: ink,
+            heading: ink,
+            focus: ink,
+            link: ink,
+            code: ink,
+            quote: ink,
+            success: ink,
+            warning: ink,
+            error: ink,
+            info: ink,
+            background: Color::Rgb(0, 0, 0),
+        },
+        image: None,
+        max_width: width.max(1),
+        max_image_rows: 1,
+        max_diagram_rows: diagrams.max(1),
+        pending: RefCell::new(Vec::new()),
+        links: RefCell::new(Vec::new()),
+    }
+}
+
+fn plain_of(lines: &[Line<'_>]) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in lines {
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        if text.trim().is_empty() && out.last().is_some_and(|prev: &String| prev.is_empty()) {
+            continue;
+        }
+        out.push(text);
+    }
+    while out.last().is_some_and(|line| line.trim().is_empty()) {
+        out.pop();
+    }
+    out
 }
 
 fn alert_style(alert: &comrak::nodes::NodeAlert, p: PreviewPalette) -> (&'static str, Style) {

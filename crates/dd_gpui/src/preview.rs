@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use dd_edit::wrap_row_starts;
 use dd_render::{
-    PackedPreviewColors, PreviewLink, looks_like_image, palette_from_packed,
-    render_markdown_annotated,
+    BlockKind, MdBlock, MdRun, PackedPreviewColors, PreviewLink, looks_like_image,
+    palette_from_packed, render_markdown_annotated, render_markdown_blocks,
 };
 use dd_vault_core::{read_prefix_nofollow, read_vault_bytes, read_vault_text};
 
@@ -116,6 +116,9 @@ pub struct SourceLine {
 pub struct PreviewDoc {
     pub lines: Vec<SourceLine>,
     pub links: Vec<PreviewLink>,
+    pub blocks: Vec<MdBlock>,
+    /// Parallel to `blocks`. Set only on image blocks.
+    pub block_images: Vec<Option<PreviewImage>>,
 }
 
 impl PreviewDoc {
@@ -132,6 +135,7 @@ impl PreviewDoc {
 type EmbedFn<'a> = &'a dyn Fn(&str) -> Option<String>;
 type ImageFn<'a> = &'a dyn Fn(&str) -> Option<Vec<u8>>;
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisplayRow {
     pub text: String,
@@ -225,11 +229,26 @@ pub fn build_preview(request: &PreviewRequest<'_>) -> PreviewDoc {
     let cols = request.cols.clamp(1, u16::MAX as usize) as u16;
     let expanded = expand_embeds(request.src, request.embed);
     let images = markdown_images(&expanded);
-    let mut queue = Vec::new();
-    for (_label, url) in images {
-        queue.push(decode_image(&url, request.read_image));
+    let decoded: Vec<Option<PreviewImage>> = images
+        .iter()
+        .map(|(_label, url)| decode_image(url, request.read_image))
+        .collect();
+    let mut queue = decoded.clone().into_iter();
+    let blocks = render_markdown_blocks(
+        request.src,
+        request.embed,
+        cols,
+        request.diagram_rows.max(1),
+    );
+    let mut image_q = decoded.into_iter();
+    let mut block_images = Vec::with_capacity(blocks.len());
+    for block in &blocks {
+        if block.kind == BlockKind::Image {
+            block_images.push(image_q.next().flatten());
+        } else {
+            block_images.push(None);
+        }
     }
-    let mut queue = queue.into_iter();
     let (text, links) = render_markdown_annotated(
         request.src,
         request.colors.palette(),
@@ -280,7 +299,320 @@ pub fn build_preview(request: &PreviewRequest<'_>) -> PreviewDoc {
             image,
         });
     }
-    PreviewDoc { lines, links }
+    PreviewDoc {
+        lines,
+        links,
+        blocks,
+        block_images,
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RichRun {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub strike: bool,
+    pub code: bool,
+    pub link: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RichBlock {
+    pub kind: BlockKind,
+    pub level: u8,
+    pub depth: u8,
+    pub marker: String,
+    pub size: f32,
+    pub line_h: f32,
+    pub mono: bool,
+    pub lines: Vec<Vec<RichRun>>,
+    pub image: Option<PreviewImage>,
+    pub height: f32,
+}
+
+/// Plain text of one block. A code or diagram block keeps its internal lines.
+pub fn block_plain(block: &MdBlock) -> String {
+    match block.kind {
+        BlockKind::Code | BlockKind::Pre => block.text.clone(),
+        BlockKind::Rule => "────────────".to_string(),
+        BlockKind::Image => {
+            let label = if block.marker.is_empty() {
+                block.text.clone()
+            } else {
+                block.marker.clone()
+            };
+            format!("[image: {label}]")
+        }
+        BlockKind::Banner => {
+            if block.text.is_empty() {
+                block.marker.clone()
+            } else {
+                format!("{} {}", block.marker, block.text)
+            }
+        }
+        BlockKind::Item => format!("{}{}", block.marker, runs_text(&block.runs)),
+        _ => runs_text(&block.runs),
+    }
+}
+
+fn runs_text(runs: &[MdRun]) -> String {
+    runs.iter().map(|run| run.text.as_str()).collect()
+}
+
+/// Wrapped blocks with explicit heights so the preview can scroll in pixels.
+pub fn layout_blocks(doc: &PreviewDoc, width_px: f32, max_image_h: f32) -> Vec<RichBlock> {
+    let width = width_px.max(80.0);
+    doc.blocks
+        .iter()
+        .enumerate()
+        .map(|(i, block)| {
+            let image = doc.block_images.get(i).cloned().flatten();
+            layout_one(block, image, width, max_image_h)
+        })
+        .collect()
+}
+
+pub fn block_tops(blocks: &[RichBlock]) -> (Vec<f32>, Vec<f32>, f32) {
+    let mut tops = Vec::with_capacity(blocks.len());
+    let mut heights = Vec::with_capacity(blocks.len());
+    let mut y = 0.0;
+    for block in blocks {
+        tops.push(y);
+        heights.push(block.height);
+        y += block.height;
+    }
+    (tops, heights, y)
+}
+
+fn layout_one(
+    block: &MdBlock,
+    image: Option<PreviewImage>,
+    width: f32,
+    max_image_h: f32,
+) -> RichBlock {
+    let (size, line_h, mono, gap) = type_metrics(block.kind, block.level);
+    if block.kind == BlockKind::Rule {
+        return RichBlock {
+            kind: block.kind,
+            level: block.level,
+            depth: block.depth,
+            marker: String::new(),
+            size,
+            line_h,
+            mono,
+            lines: Vec::new(),
+            image: None,
+            height: line_h,
+        };
+    }
+    if block.kind == BlockKind::Image {
+        let height = match &image {
+            Some(image) => image_px(image, width, max_image_h) + gap,
+            None => line_h + gap,
+        };
+        let label = if block.marker.is_empty() {
+            block.text.clone()
+        } else {
+            block.marker.clone()
+        };
+        let lines = if image.is_some() {
+            Vec::new()
+        } else {
+            vec![vec![rich_from(&MdRun {
+                text: format!("[image: {label}]"),
+                bold: false,
+                italic: false,
+                strike: false,
+                code: false,
+                link: String::new(),
+            })]]
+        };
+        return RichBlock {
+            kind: block.kind,
+            level: 0,
+            depth: block.depth,
+            marker: String::new(),
+            size,
+            line_h,
+            mono: false,
+            lines,
+            image,
+            height,
+        };
+    }
+    if block.kind == BlockKind::Banner {
+        let text = if block.text.is_empty() {
+            block.marker.clone()
+        } else {
+            format!("{}  {}", block.marker, block.text)
+        };
+        return RichBlock {
+            kind: block.kind,
+            level: block.level,
+            depth: block.depth,
+            marker: String::new(),
+            size,
+            line_h,
+            mono: false,
+            lines: vec![vec![RichRun {
+                text,
+                bold: true,
+                italic: false,
+                strike: false,
+                code: false,
+                link: String::new(),
+            }]],
+            image: None,
+            height: line_h + gap,
+        };
+    }
+    let cols = wrap_cols(width, size, mono, block.depth, &block.marker);
+    let lines = if block.kind == BlockKind::Code || block.kind == BlockKind::Pre {
+        mono_lines(&block.text, cols)
+    } else {
+        wrap_runs(&block.runs, cols)
+    };
+    let rows = lines.len().max(1) as f32;
+    RichBlock {
+        kind: block.kind,
+        level: block.level,
+        depth: block.depth,
+        marker: block.marker.clone(),
+        size,
+        line_h,
+        mono,
+        lines,
+        image: None,
+        height: rows * line_h + gap,
+    }
+}
+
+fn type_metrics(kind: BlockKind, level: u8) -> (f32, f32, bool, f32) {
+    match kind {
+        BlockKind::Heading => match level {
+            1 => (28.0, 36.0, false, 10.0),
+            2 => (22.0, 30.0, false, 8.0),
+            3 => (18.0, 26.0, false, 6.0),
+            _ => (16.0, 24.0, false, 6.0),
+        },
+        BlockKind::Code | BlockKind::Pre => (13.0, 18.0, true, 10.0),
+        BlockKind::Rule => (14.0, 12.0, false, 0.0),
+        BlockKind::Banner => (14.0, 22.0, false, 4.0),
+        BlockKind::Image => (15.0, 22.0, false, 8.0),
+        _ => (15.0, 22.0, false, 8.0),
+    }
+}
+
+fn wrap_cols(width: f32, size: f32, mono: bool, depth: u8, marker: &str) -> usize {
+    let factor = if mono { 0.62 } else { 0.5 };
+    let pad = 28.0 + f32::from(depth) * 16.0;
+    let marker_w = marker.chars().count() as f32 * size * factor;
+    let inner = (width - pad - marker_w).max(size);
+    (inner / (size * factor).max(1.0)).floor().max(4.0) as usize
+}
+
+fn wrap_runs(runs: &[MdRun], cols: usize) -> Vec<Vec<RichRun>> {
+    if runs.iter().all(|run| run.text.is_empty()) {
+        return vec![Vec::new()];
+    }
+    let text = runs_text(runs);
+    let starts = wrap_row_starts(&text, cols.max(1));
+    let chars: Vec<char> = text.chars().collect();
+    let mut lines = Vec::new();
+    for (i, &start) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(chars.len());
+        let sliced = slice_runs(runs, start, end);
+        if sliced.is_empty() {
+            lines.push(vec![blank_run()]);
+        } else {
+            lines.push(sliced);
+        }
+    }
+    if lines.is_empty() {
+        lines.push(vec![blank_run()]);
+    }
+    lines
+}
+
+fn slice_runs(runs: &[MdRun], start: usize, end: usize) -> Vec<RichRun> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    for run in runs {
+        let len = run.text.chars().count();
+        let run_end = at + len;
+        if run_end > start && at < end {
+            let lo = start.max(at) - at;
+            let hi = end.min(run_end) - at;
+            let text: String = run.text.chars().skip(lo).take(hi - lo).collect();
+            if !text.is_empty() {
+                let mut rich = rich_from(run);
+                rich.text = text;
+                out.push(rich);
+            }
+        }
+        at = run_end;
+    }
+    out
+}
+
+fn mono_lines(text: &str, cols: usize) -> Vec<Vec<RichRun>> {
+    let mut lines = Vec::new();
+    if text.is_empty() {
+        lines.push(vec![blank_run()]);
+        return lines;
+    }
+    for line in text.split('\n') {
+        if line.is_empty() {
+            lines.push(vec![blank_run()]);
+            continue;
+        }
+        let starts = wrap_row_starts(line, cols.max(1));
+        let chars: Vec<char> = line.chars().collect();
+        for (i, &start) in starts.iter().enumerate() {
+            let end = starts.get(i + 1).copied().unwrap_or(chars.len());
+            let piece: String = chars[start..end].iter().collect();
+            lines.push(vec![RichRun {
+                text: piece,
+                bold: false,
+                italic: false,
+                strike: false,
+                code: true,
+                link: String::new(),
+            }]);
+        }
+    }
+    lines
+}
+
+fn rich_from(run: &MdRun) -> RichRun {
+    RichRun {
+        text: run.text.clone(),
+        bold: run.bold,
+        italic: run.italic,
+        strike: run.strike,
+        code: run.code,
+        link: run.link.clone(),
+    }
+}
+
+fn blank_run() -> RichRun {
+    RichRun {
+        text: " ".to_string(),
+        bold: false,
+        italic: false,
+        strike: false,
+        code: false,
+        link: String::new(),
+    }
+}
+
+fn image_px(image: &PreviewImage, width: f32, max_h: f32) -> f32 {
+    if image.width == 0 || image.height == 0 {
+        return 22.0;
+    }
+    let aspect = image.height as f32 / image.width as f32;
+    (width.max(22.0) * aspect).clamp(22.0, max_h.max(22.0))
 }
 
 fn decode_image(url: &str, read_image: Option<ImageFn<'_>>) -> Option<PreviewImage> {
@@ -290,6 +622,7 @@ fn decode_image(url: &str, read_image: Option<ImageFn<'_>>) -> Option<PreviewIma
     Some(PreviewImage { png, width, height })
 }
 
+#[cfg(test)]
 pub fn display_rows(doc: &PreviewDoc, cols: usize) -> Vec<DisplayRow> {
     let cols = cols.max(1);
     let mut out = Vec::new();
@@ -342,6 +675,7 @@ pub fn display_rows(doc: &PreviewDoc, cols: usize) -> Vec<DisplayRow> {
     out
 }
 
+#[cfg(test)]
 fn slice_spans(spans: &[PreviewSpan], start: usize, end: usize) -> Vec<PreviewSpan> {
     let mut out = Vec::new();
     for span in spans {
@@ -361,6 +695,7 @@ fn slice_spans(spans: &[PreviewSpan], start: usize, end: usize) -> Vec<PreviewSp
     out
 }
 
+#[cfg(test)]
 pub fn link_at_row(
     doc: &PreviewDoc,
     row: &DisplayRow,
@@ -370,6 +705,7 @@ pub fn link_at_row(
     link_covering(doc, row.src_line, col, 1)
 }
 
+#[cfg(test)]
 pub fn link_covering(
     doc: &PreviewDoc,
     line: usize,
@@ -397,6 +733,7 @@ pub fn link_covering(
     None
 }
 
+#[cfg(test)]
 fn split_target(raw: &str) -> (String, Option<String>) {
     match raw.split_once('#') {
         Some((dst, heading)) if !dst.is_empty() && !heading.is_empty() => {
@@ -412,6 +749,7 @@ pub fn move_clamped(row: usize, len: usize, delta: isize) -> usize {
     (cur + delta).clamp(0, (len as isize) - 1) as usize
 }
 
+#[cfg(test)]
 pub fn reveal_cursor(row: usize, scroll: usize, view: usize) -> usize {
     let view = view.max(1);
     if row < scroll {
@@ -702,5 +1040,33 @@ mod tests {
         let hit = rows.iter().find(|row| row.text.contains("[[")).unwrap();
         let col = hit.text.find("[[").unwrap();
         assert_eq!(link_at_row(&doc, hit, col).unwrap().0, "note");
+    }
+
+    #[test]
+    fn proportional_layout_sizes_headings_above_body() {
+        let doc = render("# Title\n\n**bold** body\n");
+        let laid = layout_blocks(&doc, 480.0, 200.0);
+        let heading = laid
+            .iter()
+            .find(|block| block.kind == BlockKind::Heading)
+            .expect("heading");
+        let para = laid
+            .iter()
+            .find(|block| block.kind == BlockKind::Paragraph)
+            .expect("paragraph");
+        assert!(
+            heading.size > para.size,
+            "{} vs {}",
+            heading.size,
+            para.size
+        );
+        assert_eq!(heading.level, 1);
+        assert!(
+            heading.lines[0]
+                .iter()
+                .any(|run| run.text.contains("Title"))
+        );
+        assert!(para.lines.iter().flatten().any(|run| run.bold));
+        assert!(heading.height > 0.0);
     }
 }

@@ -1,6 +1,6 @@
 # dd_vault
 
-Keyboard-first, vim-flavored markdown vault. Two programs share one vault on disk: `dd_vault` in the terminal, and `dd_vault-gui` in a desktop window. Files on disk are the source of truth. Version 0.1.13. Linux and macOS. MIT.
+Keyboard-first, vim-flavored markdown vault. Two programs share one vault on disk: `dd_vault` in the terminal, and `dd_vault-gui` in a desktop window. Files on disk are the source of truth. Version 0.1.14. Linux and macOS. MIT.
 
 The terminal app builds with Rust 1.82 or newer. The desktop window needs Rust 1.92 or newer, Vulkan (`libvulkan1` and a driver), and Wayland or X11. The tutorial screenshots are the terminal.
 

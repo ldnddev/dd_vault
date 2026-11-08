@@ -5,11 +5,13 @@ mod chrome;
 mod colors;
 mod commands;
 mod editor_view;
+mod fonts;
 mod git_ui;
 mod highlight;
 mod keys;
 mod paste;
 mod preview;
+mod scroll;
 mod shell;
 mod watch;
 

@@ -40,6 +40,8 @@ pub struct GuiTheme {
     pub folders: u32,
     pub files: u32,
     pub links: u32,
+    pub scrollbar: u32,
+    pub scrollbar_hover: u32,
     pub quote: String,
 }
 
@@ -151,6 +153,8 @@ pub fn from_palette(palette: Palette) -> GuiTheme {
         folders: token(&palette, "folders", border_active),
         files: token(&palette, "files", 0xFF_AF_46),
         links: token(&palette, "links", 0xFF_A0_87),
+        scrollbar: token(&palette, "scrollbar", 0xFF_A0_87),
+        scrollbar_hover: token(&palette, "scrollbar_hover", border_active),
         quote: palette
             .header_quotes
             .first()

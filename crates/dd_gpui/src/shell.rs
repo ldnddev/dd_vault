@@ -18,9 +18,9 @@ use gpui::prelude::*;
 use gpui::{
     App, Bounds, ClipboardItem, Context, Entity, FocusHandle, FontWeight, HighlightStyle, Image,
     ImageFormat, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, Pixels, Point, Render, ScrollEvent, SharedString, StyledText, TextRun,
-    UnderlineStyle, Window, WindowBounds, WindowOptions, canvas, div, font, img, point, px, rgb,
-    size,
+    ObjectFit, Pixels, Point, Render, ScrollEvent, ScrollHandle, SharedString, StyledText, TextRun,
+    UnderlineStyle, Window, WindowBounds, WindowOptions, canvas, div, font, img, point, px,
+    relative, rgb, size,
 };
 use gpui_platform::application;
 use ldnddev_theme::{
@@ -44,6 +44,7 @@ use crate::editor_view::{
     Caret, EditorRow, OpenChoice, SessionWrite, choose_open, pane_name, prompt_line,
     remember_session, visible_editor_rows, wheel_rows,
 };
+use crate::fonts::{GuiFonts, installed_families};
 use crate::git_ui::{
     busy_word, commit_then_maybe_push, conflict_notice, notes_title, run_git, sidecar_labels,
 };
@@ -54,10 +55,11 @@ use crate::keys::{
 };
 use crate::paste::{image_markdown, note_stem, unique_asset_rel};
 use crate::preview::{
-    PreviewCache, PreviewColors, PreviewKey, PreviewRequest, PreviewSpan, build_preview,
-    display_rows, embed_body, link_at_row, link_covering, load_image_bytes, move_clamped,
-    reveal_cursor, yank_text,
+    PreviewCache, PreviewColors, PreviewKey, PreviewRequest, RichBlock, RichRun, block_plain,
+    block_tops, build_preview, embed_body, layout_blocks, load_image_bytes, move_clamped,
+    yank_text,
 };
+use crate::scroll::{ScrollPort, index_at, offset_for_thumb, rows_viewport_px, thumb_geom};
 use crate::watch::{VaultWatch, watch_rel};
 
 const MAX_OPEN_BYTES: u64 = 2_000_000;
@@ -65,7 +67,8 @@ const MAX_OPEN_BYTES: u64 = 2_000_000;
 const FONT: f32 = 14.0;
 const LINE: f32 = 20.0;
 const CHROME: f32 = 28.0;
-const FONT_FAMILY: &str = "DejaVu Sans Mono";
+const SHEET_W: f32 = 380.0;
+const BAR_W: f32 = 10.0;
 
 pub struct Boot {
     pub theme: GuiTheme,
@@ -215,6 +218,28 @@ enum SplitDrag {
     Preview,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BarKind {
+    Tree,
+    Notes,
+    Preview,
+}
+
+#[derive(Clone, Copy)]
+struct ScrollDrag {
+    kind: BarKind,
+    grab: f32,
+}
+
+struct BarPaint {
+    offset: f32,
+    visible: f32,
+    total: f32,
+    track: f32,
+    hot: bool,
+    kind: BarKind,
+}
+
 pub struct Shell {
     focus: FocusHandle,
     theme: GuiTheme,
@@ -241,8 +266,17 @@ pub struct Shell {
     drag: Option<Drag>,
     split_drag: Option<SplitDrag>,
     preview_cache: Option<PreviewCache>,
-    preview_map: Vec<(f32, usize)>,
+    preview_px: f32,
+    preview_content: f32,
+    preview_view_h: f32,
+    preview_tops: Vec<f32>,
+    preview_heights: Vec<f32>,
     preview_vis: usize,
+    scroll_drag: Option<ScrollDrag>,
+    tree_port: ScrollPort,
+    notes_port: ScrollPort,
+    preview_port: ScrollPort,
+    reading_follow: bool,
     git_rx: Option<mpsc::Receiver<Result<(String, GitOpResult), String>>>,
     busy_kind: Option<&'static str>,
     ai: AiCard,
@@ -253,6 +287,16 @@ pub struct Shell {
     help_view: usize,
     theme_picker: Option<ThemePicker>,
     theme_editor: Option<ThemeEditor>,
+    mono: String,
+    sans: String,
+    font_saved: (String, String),
+    font_snapshot: (String, String),
+    families: Vec<String>,
+    family_selected: usize,
+    family_scroll: usize,
+    font_filter: Option<String>,
+    appear: AppearSection,
+    measured_mono: String,
     body_cols: u16,
     tree_px: f32,
 }
@@ -270,6 +314,10 @@ struct NotesView {
     prompt: Option<String>,
     caret_bar: Option<Point<Pixels>>,
     focused: bool,
+    bar: Option<BarPaint>,
+    port: ScrollHandle,
+    content_h: f32,
+    origin: usize,
 }
 
 struct TreeView {
@@ -278,6 +326,10 @@ struct TreeView {
     filter: Option<String>,
     focused: bool,
     width: f32,
+    bar: Option<BarPaint>,
+    port: ScrollHandle,
+    content_h: f32,
+    origin: usize,
 }
 
 struct VaultPanes {
@@ -295,23 +347,18 @@ enum Body {
 struct PreviewView {
     title: String,
     focused: bool,
-    rows: Vec<PreviewPaint>,
+    blocks: Vec<RichBlock>,
+    scroll_px: f32,
+    view_h: f32,
     fixed_h: Option<f32>,
-}
-
-struct PreviewPaint {
-    height: f32,
-    text: String,
-    spans: Vec<PreviewSpan>,
-    cursor: bool,
-    selected: bool,
-    image: Option<PreviewImagePaint>,
-}
-
-struct PreviewImagePaint {
-    png: Vec<u8>,
-    width: u32,
-    height: u32,
+    cursor: Option<usize>,
+    selected: Option<(usize, usize)>,
+    message: Option<String>,
+    bar: Option<BarPaint>,
+    port: ScrollHandle,
+    content_h: f32,
+    mono: String,
+    sans: String,
 }
 
 #[derive(Clone)]
@@ -336,8 +383,44 @@ struct Frame {
     overlay: Option<OverlayView>,
     ai_float: Option<AiPaint>,
     help: Option<Vec<String>>,
-    theme_panel: Option<OverlayView>,
+    theme_panel: Option<AppearanceView>,
     toasts: Vec<ToastPaint>,
+    live_pointer: bool,
+    split_cursor: Option<SplitDrag>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppearSection {
+    Theme,
+    Mono,
+    Sans,
+}
+
+#[derive(Clone, Copy)]
+enum AppearAction {
+    None,
+    Theme(usize),
+    Color(usize),
+    Family(usize),
+    Focus(AppearSection),
+}
+
+#[derive(Clone)]
+struct AppearLine {
+    text: String,
+    selected: bool,
+    action: AppearAction,
+}
+
+#[derive(Clone)]
+struct AppearanceView {
+    title: String,
+    hint: String,
+    lines: Vec<AppearLine>,
+    editor_font: String,
+    preview_font: String,
+    editor_on: bool,
+    preview_on: bool,
 }
 
 #[derive(Clone)]
@@ -365,6 +448,8 @@ impl Shell {
         let (open, notice, status) = attach_boot(&boot);
         let picker = boot.registry.vaults.clone();
         let ai = AiCard::load(&boot.paths);
+        let fonts = GuiFonts::load(&boot.paths.ldnddev_dir().join("config.toml"));
+        let font_pair = (fonts.mono.clone(), fonts.sans.clone());
         let mut toasts = Vec::new();
         if let Some(warning) = boot.warning.clone() {
             push_toast(&mut toasts, ToastLevel::Warning, warning);
@@ -402,8 +487,17 @@ impl Shell {
             drag: None,
             split_drag: None,
             preview_cache: None,
-            preview_map: Vec::new(),
+            preview_px: 0.0,
+            preview_content: 0.0,
+            preview_view_h: LINE,
+            preview_tops: Vec::new(),
+            preview_heights: Vec::new(),
             preview_vis: 1,
+            scroll_drag: None,
+            tree_port: ScrollPort::new(),
+            notes_port: ScrollPort::new(),
+            preview_port: ScrollPort::new(),
+            reading_follow: false,
             git_rx: None,
             busy_kind: None,
             ai,
@@ -414,6 +508,16 @@ impl Shell {
             help_view: 24,
             theme_picker: None,
             theme_editor: None,
+            mono: fonts.mono,
+            sans: fonts.sans,
+            font_saved: font_pair.clone(),
+            font_snapshot: font_pair,
+            families: Vec::new(),
+            family_selected: 0,
+            family_scroll: 0,
+            font_filter: None,
+            appear: AppearSection::Theme,
+            measured_mono: String::new(),
             body_cols: 120,
             tree_px: 0.,
         };
@@ -492,7 +596,8 @@ impl Shell {
             if !show_preview_pane {
                 self.hit.preview = None;
                 self.hit.preview_pane = None;
-                self.preview_map.clear();
+                self.preview_tops.clear();
+                self.preview_heights.clear();
             }
             let tree = if show_tree_pane {
                 Some(self.tree_view(window))
@@ -530,10 +635,13 @@ impl Shell {
         } else {
             None
         };
+        if self.theme_open() && self.appear != AppearSection::Theme {
+            self.reveal_family();
+        }
         let theme_panel = if self.help {
             None
         } else if self.theme_open() {
-            Some(self.theme_overlay())
+            Some(self.appearance_view())
         } else {
             None
         };
@@ -556,6 +664,8 @@ impl Shell {
             help,
             theme_panel,
             toasts,
+            live_pointer: self.open.is_some() && !self.modal_up(),
+            split_cursor: self.split_drag,
         }
     }
 
@@ -581,13 +691,13 @@ impl Shell {
     }
 
     fn ensure_char_width(&mut self, window: &mut Window) {
-        if self.char_w > px(0.) {
+        if self.char_w > px(0.) && self.measured_mono == self.mono {
             return;
         }
         let text: SharedString = "M".into();
         let run = TextRun {
             len: text.len(),
-            font: font(FONT_FAMILY),
+            font: font(self.mono.clone()),
             color: rgb(self.theme.text_primary).into(),
             background_color: None,
             underline: None,
@@ -598,13 +708,16 @@ impl Shell {
             .shape_line(text, px(FONT), &[run], None);
         let width = shaped.width();
         self.char_w = if width > px(0.) { width } else { px(8.) };
+        self.measured_mono = self.mono.clone();
     }
 
     fn tree_view(&mut self, window: &Window) -> TreeView {
         let theme = self.theme.clone();
         let filtering = self.open.as_ref().is_some_and(|open| open.tree.filtering);
-        let rows_fit = self.row_count(window, self.hit.tree, filtering);
+        let view_px = self.pane_view_px(BarKind::Tree, window);
+        let rows_fit = self.rows_from_px(view_px);
         self.tree_rows = rows_fit;
+        self.adopt_tree_scroll();
         let char_w = self.char_w;
         let tree_px = self.tree_px;
         let open = self.open.as_mut().expect("vault");
@@ -664,12 +777,28 @@ impl Shell {
         } else {
             None
         };
+        let total = visible.len() as f32;
+        let offset = open.tree.scroll as f32;
+        let focused = open.pane_tree;
+        let origin = open.tree.scroll;
+        let port = self.tree_port.handle.clone();
+        self.tree_port.push_px(offset * LINE);
         TreeView {
             title,
             rows,
             filter,
-            focused: open.pane_tree,
+            focused,
             width: tree_px,
+            bar: self.bar_paint(
+                BarKind::Tree,
+                offset,
+                rows_fit.max(1) as f32,
+                total,
+                view_px,
+            ),
+            port,
+            content_h: (total * LINE).max(1.0),
+            origin,
         }
     }
 
@@ -683,7 +812,8 @@ impl Shell {
             .as_ref()
             .map(|open| open.editor.gutter_cols() as usize)
             .unwrap_or(4);
-        let rows_fit = self.row_count(window, self.hit.notes, prompt.is_some());
+        let view_px = self.pane_view_px(BarKind::Notes, window);
+        let rows_fit = self.rows_from_px(view_px);
         self.text_rows = rows_fit;
         let char_w = self.char_w;
         let notes_w = self
@@ -692,10 +822,11 @@ impl Shell {
             .map(|bounds| bounds.size.width)
             .unwrap_or_else(|| (window.viewport_size().width - px(self.tree_px)).max(char_w * 8.));
         let gutter_px = char_w * self.gutter_cols as f32;
-        let text_px = (notes_w - gutter_px - char_w).max(char_w);
+        let text_px = (notes_w - gutter_px - char_w - px(BAR_W)).max(char_w);
         self.text_cols = (text_px / char_w).floor().max(1.0) as usize;
         let wrap = self.open.as_ref().is_some_and(|open| open.wrap);
         self.wrap_width = if wrap { self.text_cols } else { usize::MAX };
+        self.adopt_notes_scroll();
         let text_rows = self.text_rows;
         let wrap_width = self.wrap_width;
         let text_cols = self.text_cols;
@@ -720,12 +851,27 @@ impl Shell {
             open.editor.dirty,
             open.git.state,
         );
+        let total = open.editor.visual_len(wrap_width) as f32;
+        let offset = open.editor.visual_origin(wrap_width) as f32;
+        let origin = offset as usize;
+        let port = self.notes_port.handle.clone();
+        self.notes_port.push_px(offset * LINE);
         NotesView {
             title,
             rows,
             prompt,
             caret_bar,
             focused,
+            bar: self.bar_paint(
+                BarKind::Notes,
+                offset,
+                text_rows.max(1) as f32,
+                total,
+                view_px,
+            ),
+            port,
+            content_h: (total * LINE).max(1.0),
+            origin,
         }
     }
 
@@ -737,30 +883,38 @@ impl Shell {
         } else {
             " preview ".to_string()
         };
+        let fixed_h = self.preview_fixed_h(window);
+        let height = self.pane_view_px(BarKind::Preview, window);
         let has_note = self
             .open
             .as_ref()
             .is_some_and(|open| open.editor.rel.is_some());
         if !has_note {
-            self.preview_map = vec![(LINE, 0)];
+            self.preview_tops.clear();
+            self.preview_heights.clear();
+            self.preview_content = 0.0;
+            self.preview_view_h = height;
+            self.preview_px = 0.0;
             self.preview_vis = 1;
+            self.preview_port.push_px(0.0);
             return PreviewView {
                 title,
                 focused,
-                fixed_h: self.preview_fixed_h(window),
-                rows: vec![PreviewPaint {
-                    height: LINE,
-                    text: "open a note to preview".into(),
-                    spans: Vec::new(),
-                    cursor: false,
-                    selected: false,
-                    image: None,
-                }],
+                blocks: Vec::new(),
+                scroll_px: 0.0,
+                view_h: height,
+                fixed_h,
+                cursor: None,
+                selected: None,
+                message: Some("open a note to preview".into()),
+                bar: None,
+                port: self.preview_port.handle.clone(),
+                content_h: 1.0,
+                mono: self.mono.clone(),
+                sans: self.sans.clone(),
             };
         }
-        let height = self.preview_height_px(window);
         let cols = self.preview_cols(window);
-        let pane_w = self.preview_width_px(window);
         let fit = (height / LINE).floor().max(1.0) as u16;
         let (image_rows, diagram_rows) = if reading {
             (fit.max(1), fit.max(1))
@@ -768,85 +922,174 @@ impl Shell {
             (fit.clamp(1, 16), fit.saturating_mul(2).clamp(16, 48))
         };
         self.refresh_preview(cols, image_rows, diagram_rows);
-        let Some(doc) = self.preview_cache.as_ref().map(|cache| cache.doc.clone()) else {
-            self.preview_map.clear();
-            self.preview_vis = 1;
-            return PreviewView {
-                title,
-                focused,
-                fixed_h: self.preview_fixed_h(window),
-                rows: Vec::new(),
-            };
+        let width = self.preview_width_px(window);
+        let max_image = if reading {
+            height.max(LINE)
+        } else {
+            height.clamp(LINE, LINE * 16.0)
         };
-        let rendered = display_rows(&doc, cols);
-        let total = rendered.len().max(1);
-        if let Some(open) = &mut self.open {
-            open.preview_scroll = open.preview_scroll.min(total - 1);
-            if open.preview_row >= rendered.len() {
-                open.preview_row = rendered.len().saturating_sub(1);
-            }
-            if reading {
-                let view = self.preview_vis.max(1);
-                open.preview_scroll = reveal_cursor(open.preview_row, open.preview_scroll, view);
-                open.preview_scroll = open.preview_scroll.min(total - 1);
-            }
-        }
-        let scroll = self
-            .open
+        let blocks = self
+            .preview_cache
             .as_ref()
-            .map(|open| open.preview_scroll)
-            .unwrap_or(0);
+            .map(|cache| layout_blocks(&cache.doc, width, max_image))
+            .unwrap_or_default();
+        let (tops, heights, content) = block_tops(&blocks);
+        self.preview_tops = tops;
+        self.preview_heights = heights;
+        self.preview_content = content;
+        self.preview_view_h = height;
+        let count = blocks.len().max(1);
+        if let Some(open) = &mut self.open
+            && open.preview_row >= count
+        {
+            open.preview_row = count - 1;
+        }
+        self.adopt_preview_scroll();
+        if reading && self.reading_follow {
+            self.reveal_reading_px();
+        }
+        let max_px = (content - height).max(0.0);
+        if self.preview_px > max_px {
+            self.preview_px = max_px;
+        }
+        if self.preview_px < 0.0 {
+            self.preview_px = 0.0;
+        }
+        let top_index = index_at(&self.preview_tops, &self.preview_heights, self.preview_px);
+        if let Some(open) = &mut self.open
+            && !reading
+        {
+            open.preview_scroll = top_index;
+        }
+        let focused = self.open.as_ref().is_some_and(|open| open.focus_preview);
         let cursor = self.open.as_ref().map(|open| open.preview_row).unwrap_or(0);
         let visual = self.open.as_ref().and_then(|open| open.preview_visual);
-        let (sel_a, sel_b) = if reading {
-            let row = cursor.min(total - 1);
+        self.preview_vis = blocks_fitting(&self.preview_heights, cursor, height).max(1);
+        let selected = if reading {
+            let row = cursor.min(count - 1);
             match visual {
                 Some(anchor) => {
-                    let anchor = anchor.min(total - 1);
-                    (anchor.min(row), anchor.max(row))
+                    let anchor = anchor.min(count - 1);
+                    Some((anchor.min(row), anchor.max(row)))
                 }
-                None => (row, row),
+                None => None,
             }
         } else {
-            (usize::MAX, 0)
+            None
         };
-        let mut rows = Vec::new();
-        let mut used = 0.0;
-        let mut map = Vec::new();
-        for (index, row) in rendered.iter().enumerate().skip(scroll) {
-            let image = row.image.as_ref().map(|image| PreviewImagePaint {
-                png: image.png.clone(),
-                width: image.width,
-                height: image.height,
-            });
-            let row_h = if let Some(image) = &image {
-                image_row_height(image, pane_w, image_rows)
-            } else {
-                LINE
-            };
-            if !rows.is_empty() && used + row_h > height + 0.5 {
-                break;
-            }
-            used += row_h;
-            let cursor_row = reading && index == cursor;
-            let selected = reading && visual.is_some() && index >= sel_a && index <= sel_b;
-            map.push((row_h, index));
-            rows.push(PreviewPaint {
-                height: row_h,
-                text: row.text.clone(),
-                spans: row.spans.clone(),
-                cursor: cursor_row && !selected,
-                selected,
-                image,
-            });
-        }
-        self.preview_vis = rows.len().max(1);
-        self.preview_map = map;
+        let cursor = if reading {
+            Some(cursor.min(count - 1))
+        } else {
+            None
+        };
+        let bar = self.bar_paint(BarKind::Preview, self.preview_px, height, content, height);
+        self.preview_port.push_px(self.preview_px);
         PreviewView {
             title,
             focused,
-            rows,
-            fixed_h: self.preview_fixed_h(window),
+            blocks,
+            scroll_px: self.preview_px,
+            view_h: height,
+            fixed_h,
+            cursor,
+            selected,
+            message: None,
+            bar,
+            port: self.preview_port.handle.clone(),
+            content_h: content.max(1.0),
+            mono: self.mono.clone(),
+            sans: self.sans.clone(),
+        }
+    }
+
+    fn reveal_reading_px(&mut self) {
+        let row = self.open.as_ref().map(|open| open.preview_row).unwrap_or(0);
+        let top = self.preview_tops.get(row).copied().unwrap_or(0.0);
+        let h = self.preview_heights.get(row).copied().unwrap_or(LINE);
+        let view = self.preview_view_h.max(1.0);
+        if top < self.preview_px {
+            self.preview_px = top;
+        } else if top + h > self.preview_px + view {
+            self.preview_px = (top + h - view).max(0.0);
+        }
+    }
+
+    fn bar_paint(
+        &self,
+        kind: BarKind,
+        offset: f32,
+        visible: f32,
+        total: f32,
+        track: f32,
+    ) -> Option<BarPaint> {
+        let track = track.max(1.0);
+        thumb_geom(offset, visible, total, track)?;
+        let hot = self.scroll_drag.is_some_and(|drag| drag.kind == kind);
+        Some(BarPaint {
+            offset,
+            visible,
+            total,
+            track,
+            hot,
+            kind,
+        })
+    }
+
+    fn pane_view_px(&self, kind: BarKind, window: &Window) -> f32 {
+        let filtering = self.open.as_ref().is_some_and(|open| open.tree.filtering);
+        let prompt = self
+            .open
+            .as_ref()
+            .and_then(|open| prompt_line(&open.editor));
+        let (port, rows, pane, chrome, extra) = match kind {
+            BarKind::Tree => (
+                self.tree_port.view_px(),
+                self.hit.tree,
+                self.hit.tree_pane,
+                CHROME + if filtering { LINE } else { 0.0 },
+                filtering,
+            ),
+            BarKind::Notes => (
+                self.notes_port.view_px(),
+                self.hit.notes,
+                self.hit.notes_pane,
+                CHROME + if prompt.is_some() { LINE } else { 0.0 },
+                prompt.is_some(),
+            ),
+            BarKind::Preview => (
+                self.preview_port.view_px(),
+                self.hit.preview,
+                self.hit.preview_pane,
+                CHROME,
+                false,
+            ),
+        };
+        let fallback = if kind == BarKind::Preview {
+            self.preview_fallback_px(window)
+        } else {
+            self.fallback_body_px(window, extra)
+        };
+        rows_viewport_px(
+            port,
+            rows.map(|bounds| bounds.size.height / px(1.)),
+            pane.map(|bounds| bounds.size.height / px(1.)),
+            chrome,
+            fallback,
+        )
+    }
+
+    fn fallback_body_px(&self, window: &Window, extra: bool) -> f32 {
+        let extra_h = if extra { LINE } else { 0.0 };
+        (window.viewport_size().height / px(1.) - CHROME * 3.0 - extra_h).max(LINE)
+    }
+
+    fn preview_fallback_px(&self, window: &Window) -> f32 {
+        let view = window.viewport_size().height / px(1.);
+        let body = (view - CHROME * 2.0).max(LINE * 8.0);
+        if self.open.as_ref().is_some_and(|open| open.preview_read) {
+            (body - CHROME).max(LINE)
+        } else {
+            (body * 0.4).max(LINE * 6.0)
         }
     }
 
@@ -867,29 +1110,23 @@ impl Shell {
         Some(preview_fixed_px(split, LINE, body))
     }
 
-    fn preview_height_px(&self, window: &Window) -> f32 {
-        if let Some(bounds) = self.hit.preview {
-            return (bounds.size.height / px(1.)).max(LINE);
-        }
-        let view = window.viewport_size().height / px(1.);
-        let body = (view - CHROME * 2.0).max(LINE * 8.0);
-        if self.open.as_ref().is_some_and(|open| open.preview_read) {
-            (body - CHROME).max(LINE)
-        } else {
-            (body * 0.4).max(LINE * 6.0)
-        }
+    fn rows_from_px(&self, height: f32) -> usize {
+        let line = (self.line_h / px(1.)).max(1.0);
+        (height / line).floor().max(1.0) as usize
     }
 
     fn preview_width_px(&self, window: &Window) -> f32 {
-        if let Some(bounds) = self.hit.preview {
-            return (bounds.size.width / px(1.)).max(LINE);
-        }
-        let full = window.viewport_size().width / px(1.);
-        if self.open.as_ref().is_some_and(|open| open.preview_read) {
-            full
+        let raw = if let Some(bounds) = self.hit.preview {
+            bounds.size.width / px(1.)
         } else {
-            (full - self.tree_px).max(LINE * 8.0)
-        }
+            let full = window.viewport_size().width / px(1.);
+            if self.open.as_ref().is_some_and(|open| open.preview_read) {
+                full
+            } else {
+                (full - self.tree_px).max(LINE * 8.0)
+            }
+        };
+        (raw - BAR_W).max(LINE)
     }
 
     fn preview_cols(&self, window: &Window) -> usize {
@@ -910,6 +1147,10 @@ impl Shell {
         let colors = PreviewColors::from_theme(&self.theme);
         let palette = colors.key();
         let rel_key = Some(rel.clone());
+        let same_note = self
+            .preview_cache
+            .as_ref()
+            .is_some_and(|cache| cache.rel.as_deref() == Some(rel.as_str()));
         if self.preview_cache.as_ref().is_some_and(|cache| {
             cache.matches(&PreviewKey {
                 rel: &rel_key,
@@ -948,18 +1189,53 @@ impl Shell {
             epoch,
             doc,
         });
+        if !same_note {
+            self.preview_px = 0.0;
+        }
     }
 
-    fn row_count(&self, window: &Window, bounds: Option<Bounds<Pixels>>, extra: bool) -> usize {
-        let height = if let Some(bounds) = bounds {
-            bounds.size.height
-        } else {
-            // Header, pane title, and footer. Both panes share that chrome.
-            let chrome = px(CHROME) * 3.;
-            let extra_h = if extra { px(LINE) } else { px(0.) };
-            (window.viewport_size().height - chrome - extra_h).max(px(LINE))
+    fn adopt_tree_scroll(&mut self) {
+        if self.modal_up() {
+            return;
+        }
+        let Some(y) = self.tree_port.pull_px() else {
+            return;
         };
-        (height / self.line_h).floor().max(1.0) as usize
+        let next = (y / LINE).round().max(0.0);
+        let current = self.open.as_ref().map(|open| open.tree.scroll).unwrap_or(0) as f32;
+        if (next - current).abs() < 0.5 {
+            return;
+        }
+        self.set_tree_offset(next);
+    }
+
+    fn adopt_notes_scroll(&mut self) {
+        if self.modal_up() {
+            return;
+        }
+        let Some(y) = self.notes_port.pull_px() else {
+            return;
+        };
+        let next = (y / LINE).round().max(0.0);
+        let current = self
+            .open
+            .as_ref()
+            .map(|open| open.editor.visual_origin(self.wrap_width))
+            .unwrap_or(0) as f32;
+        if (next - current).abs() < 0.5 {
+            return;
+        }
+        self.set_notes_offset(next);
+    }
+
+    fn adopt_preview_scroll(&mut self) {
+        if self.modal_up() {
+            return;
+        }
+        let Some(y) = self.preview_port.pull_px() else {
+            return;
+        };
+        self.set_preview_px(y);
     }
 
     fn footer_text(&self) -> String {
@@ -1595,6 +1871,13 @@ impl Shell {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(drag) = self.scroll_drag {
+            if event.dragging() {
+                self.drag_bar(drag, event.position);
+                cx.notify();
+            }
+            return;
+        }
         if let Some(kind) = self.split_drag {
             if event.dragging() {
                 self.drag_split(kind, event.position);
@@ -1630,6 +1913,10 @@ impl Shell {
         if event.button != MouseButton::Left {
             return;
         }
+        if self.scroll_drag.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.split_drag.take().is_some() {
             self.persist();
             cx.notify();
@@ -1659,40 +1946,7 @@ impl Shell {
         if self.theme_open() {
             self.scroll_theme(rows);
             cx.notify();
-            return;
         }
-        if self.modal_up() {
-            return;
-        }
-        if self.hit_tree(event.position) {
-            if let Some(open) = &mut self.open {
-                open.pane_tree = true;
-                open.focus_preview = false;
-                let max = open
-                    .tree
-                    .visible()
-                    .len()
-                    .saturating_sub(self.tree_rows.max(1));
-                let next = open.tree.scroll as isize + rows;
-                open.tree.scroll = next.clamp(0, max as isize) as usize;
-            }
-        } else if self.hit_preview(event.position) {
-            self.scroll_preview(rows);
-        } else if self
-            .hit
-            .notes
-            .is_some_and(|bounds| bounds.contains(&event.position))
-        {
-            if let Some(open) = &mut self.open {
-                open.pane_tree = false;
-                open.focus_preview = false;
-                open.editor
-                    .scroll_wrapped(rows, self.text_rows.max(1), self.wrap_width);
-            }
-        } else {
-            return;
-        }
-        cx.notify();
     }
 
     fn hit_tree(&self, pos: Point<Pixels>) -> bool {
@@ -1897,6 +2151,7 @@ impl Shell {
             open.focus_preview = true;
             open.pane_tree = false;
             open.preview_row = open.preview_scroll;
+            self.reading_follow = true;
         } else {
             open.focus_preview = false;
         }
@@ -1912,6 +2167,8 @@ impl Shell {
             open.preview_scroll = 0;
             open.preview_row = 0;
             open.preview_visual = None;
+            self.preview_px = 0.0;
+            self.reading_follow = true;
         } else {
             open.focus_preview = false;
         }
@@ -1922,22 +2179,18 @@ impl Shell {
             self.handle_reading_key(press, cx);
             return;
         }
-        let len = self.preview_len();
-        let Some(open) = &mut self.open else {
-            return;
-        };
+        let page = self.preview_view_h.max(LINE);
         match preview_motion(press) {
-            Some(delta) => {
-                let next = open.preview_scroll as isize + delta;
-                open.preview_scroll = next.clamp(0, (len as isize) - 1) as usize;
-            }
-            None if is_home(press) => open.preview_scroll = 0,
-            None if is_end(press) => open.preview_scroll = len.saturating_sub(1),
+            Some(delta) if delta.abs() >= 10 => self.nudge_preview(delta.signum() as f32 * page),
+            Some(delta) => self.nudge_preview(delta as f32 * LINE),
+            None if is_home(press) => self.set_preview_px(0.0),
+            None if is_end(press) => self.set_preview_px(self.preview_content),
             None => {}
         }
     }
 
     fn handle_reading_key(&mut self, press: KeyPress<'_>, cx: &mut Context<Self>) {
+        self.reading_follow = true;
         if press.key == "escape" {
             let visual = self.open.as_ref().and_then(|open| open.preview_visual);
             if visual.is_some() {
@@ -1977,18 +2230,14 @@ impl Shell {
                 return;
             };
             open.preview_row = 0;
-            open.preview_scroll = reveal_cursor(0, open.preview_scroll, self.preview_vis.max(1));
+            open.preview_scroll = 0;
             return;
         } else if is_end(press) {
             let Some(open) = &mut self.open else {
                 return;
             };
             open.preview_row = len.saturating_sub(1);
-            open.preview_scroll = reveal_cursor(
-                open.preview_row,
-                open.preview_scroll,
-                self.preview_vis.max(1),
-            );
+            open.preview_scroll = open.preview_row;
             return;
         } else {
             return;
@@ -1997,15 +2246,11 @@ impl Shell {
             return;
         };
         open.preview_row = move_clamped(open.preview_row, len, delta);
-        open.preview_scroll = reveal_cursor(
-            open.preview_row,
-            open.preview_scroll,
-            self.preview_vis.max(1),
-        );
+        open.preview_scroll = open.preview_row;
     }
 
     fn yank_preview(&mut self, cx: &mut Context<Self>) {
-        let lines = self.preview_line_texts();
+        let lines = self.block_plains();
         let (row, visual) = self
             .open
             .as_ref()
@@ -2027,38 +2272,25 @@ impl Shell {
     }
 
     fn preview_len(&self) -> usize {
-        self.preview_line_texts().len().max(1)
+        self.block_plains().len().max(1)
     }
 
-    fn preview_line_texts(&self) -> Vec<String> {
-        let Some(cache) = &self.preview_cache else {
-            return Vec::new();
-        };
-        display_rows(&cache.doc, cache.cols)
-            .into_iter()
-            .map(|row| row.text)
-            .collect()
+    fn block_plains(&self) -> Vec<String> {
+        self.preview_cache
+            .as_ref()
+            .map(|cache| cache.doc.blocks.iter().map(block_plain).collect())
+            .unwrap_or_default()
     }
 
     fn preview_link(
         &self,
         index: usize,
-        col: usize,
-        span: usize,
+        _col: usize,
+        _span: usize,
     ) -> Option<(String, Option<String>)> {
-        let cache = self.preview_cache.as_ref()?;
-        let rows = display_rows(&cache.doc, cache.cols);
-        let row = rows.get(index)?;
-        if span <= 1 {
-            link_at_row(&cache.doc, row, col)
-        } else {
-            link_covering(
-                &cache.doc,
-                row.src_line,
-                row.src_col.saturating_add(col),
-                span,
-            )
-        }
+        let block = self.preview_cache.as_ref()?.doc.blocks.get(index)?;
+        let run = block.runs.iter().find(|run| !run.link.is_empty())?;
+        Some(split_link(&run.link))
     }
 
     fn open_external_current(&mut self) {
@@ -2105,16 +2337,7 @@ impl Shell {
     }
 
     fn open_external_on_row(&mut self, index: usize) {
-        let span = self
-            .preview_cache
-            .as_ref()
-            .and_then(|cache| {
-                display_rows(&cache.doc, cache.cols)
-                    .get(index)
-                    .map(|row| row.text.chars().count().max(1))
-            })
-            .unwrap_or(1);
-        match self.preview_link(index, 0, span) {
+        match self.preview_link(index, 0, 1) {
             Some((target, _)) => self.open_external_raw(&target),
             None => self.status = Some("No link on this preview line".into()),
         }
@@ -2151,24 +2374,6 @@ impl Shell {
         )
     }
 
-    fn scroll_preview(&mut self, rows: isize) {
-        let len = self.preview_len();
-        let reading = self.open.as_ref().is_some_and(|open| open.preview_read);
-        let Some(open) = &mut self.open else {
-            return;
-        };
-        open.pane_tree = false;
-        open.focus_preview = true;
-        if reading {
-            open.preview_row = move_clamped(open.preview_row, len, rows);
-            let view = self.preview_vis.max(1);
-            open.preview_scroll = reveal_cursor(open.preview_row, open.preview_scroll, view);
-        } else {
-            let next = open.preview_scroll as isize + rows;
-            open.preview_scroll = next.clamp(0, (len as isize) - 1) as usize;
-        }
-    }
-
     fn hit_preview(&self, pos: Point<Pixels>) -> bool {
         self.hit.preview.is_some_and(|bounds| bounds.contains(&pos))
     }
@@ -2177,10 +2382,14 @@ impl Shell {
         let Some((index, col)) = self.preview_cell(event.position) else {
             return;
         };
+        let reading = self.open.as_ref().is_some_and(|open| open.preview_read);
+        if reading {
+            self.reading_follow = true;
+        }
         if let Some(open) = &mut self.open {
             open.pane_tree = false;
             open.focus_preview = true;
-            if open.preview_read {
+            if reading {
                 open.preview_row = index;
             }
         }
@@ -2189,10 +2398,6 @@ impl Shell {
                 Some((target, _)) => self.open_external_raw(&target),
                 None => self.status = Some("No link under the pointer".into()),
             }
-            return;
-        }
-        if let Some((target, heading)) = self.preview_link(index, col, 1) {
-            self.follow_target(&target, heading.as_deref());
         }
     }
 
@@ -2201,18 +2406,182 @@ impl Shell {
         if !bounds.contains(&pos) {
             return None;
         }
-        let y = (pos.y - bounds.origin.y) / px(1.);
-        let x = ((pos.x - bounds.origin.x) / px(1.) - 8.0).max(0.0);
+        let local_x = (pos.x - bounds.origin.x) / px(1.);
+        let width = bounds.size.width / px(1.);
+        if local_x >= width - BAR_W {
+            return None;
+        }
+        let y = (pos.y - bounds.origin.y) / px(1.) + self.preview_px;
+        if self.preview_tops.is_empty() {
+            return None;
+        }
+        let index = index_at(&self.preview_tops, &self.preview_heights, y);
+        let x = (local_x - 8.0).max(0.0);
         let char_w = (self.char_w / px(1.)).max(1.0);
         let col = (x / char_w).floor().max(0.0) as usize;
-        let mut at = 0.0;
-        for (height, index) in &self.preview_map {
-            if y < at + *height {
-                return Some((*index, col));
-            }
-            at += *height;
+        Some((index, col))
+    }
+
+    fn focus_preview_pane(&mut self) {
+        if let Some(open) = &mut self.open {
+            open.pane_tree = false;
+            open.focus_preview = true;
         }
-        self.preview_map.last().map(|(_, index)| (*index, col))
+    }
+
+    fn nudge_preview(&mut self, dy: f32) {
+        self.set_preview_px(self.preview_px + dy);
+    }
+
+    fn set_preview_px(&mut self, px: f32) {
+        // Pixel scrolling must not be snapped back by the reading-view reveal.
+        self.reading_follow = false;
+        let max = (self.preview_content - self.preview_view_h).max(0.0);
+        self.preview_px = px.clamp(0.0, max);
+        let index = index_at(&self.preview_tops, &self.preview_heights, self.preview_px);
+        if let Some(open) = &mut self.open {
+            open.pane_tree = false;
+            open.focus_preview = true;
+            open.preview_scroll = index;
+            if open.preview_read {
+                open.preview_row = index;
+            }
+        }
+    }
+
+    fn bar_down(&mut self, kind: BarKind, event: &MouseDownEvent) {
+        if self.modal_up() || event.button != MouseButton::Left {
+            return;
+        }
+        let Some(bounds) = self.bar_bounds(kind) else {
+            return;
+        };
+        let y = (event.position.y - bounds.origin.y) / px(1.);
+        let track = self.pointer_track(kind, bounds);
+        if y < 0.0 || y > track {
+            return;
+        }
+        let (offset, visible, total) = self.bar_units(kind);
+        let Some(thumb) = thumb_geom(offset, visible, total, track) else {
+            return;
+        };
+        if y >= thumb.y && y <= thumb.y + thumb.h {
+            self.scroll_drag = Some(ScrollDrag {
+                kind,
+                grab: y - thumb.y,
+            });
+        } else if y < thumb.y {
+            self.page_bar(kind, -1.0);
+        } else {
+            self.page_bar(kind, 1.0);
+        }
+    }
+
+    fn drag_bar(&mut self, drag: ScrollDrag, pos: Point<Pixels>) {
+        let Some(bounds) = self.bar_bounds(drag.kind) else {
+            return;
+        };
+        let y = (pos.y - bounds.origin.y) / px(1.);
+        let track = self.pointer_track(drag.kind, bounds);
+        let (_offset, visible, total) = self.bar_units(drag.kind);
+        let next = offset_for_thumb(y - drag.grab, visible, total, track);
+        match drag.kind {
+            BarKind::Tree => self.set_tree_offset(next),
+            BarKind::Notes => self.set_notes_offset(next),
+            BarKind::Preview => self.set_preview_px(next),
+        }
+    }
+
+    fn page_bar(&mut self, kind: BarKind, sign: f32) {
+        match kind {
+            BarKind::Tree => {
+                let current = self.open.as_ref().map(|open| open.tree.scroll).unwrap_or(0) as f32;
+                self.set_tree_offset(current + self.tree_rows.max(1) as f32 * sign);
+            }
+            BarKind::Notes => {
+                let current = self
+                    .open
+                    .as_ref()
+                    .map(|open| open.editor.visual_origin(self.wrap_width))
+                    .unwrap_or(0) as f32;
+                self.set_notes_offset(current + self.text_rows.max(1) as f32 * sign);
+            }
+            BarKind::Preview => self.set_preview_px(self.preview_px + self.preview_view_h * sign),
+        }
+    }
+
+    fn pointer_track(&self, kind: BarKind, bounds: Bounds<Pixels>) -> f32 {
+        let laid_out = match kind {
+            BarKind::Tree => self.tree_port.view_px(),
+            BarKind::Notes => self.notes_port.view_px(),
+            BarKind::Preview => self.preview_port.view_px(),
+        };
+        laid_out.unwrap_or(bounds.size.height / px(1.)).max(1.0)
+    }
+
+    fn bar_bounds(&self, kind: BarKind) -> Option<Bounds<Pixels>> {
+        match kind {
+            BarKind::Tree => self.hit.tree,
+            BarKind::Notes => self.hit.notes,
+            BarKind::Preview => self.hit.preview,
+        }
+    }
+
+    fn bar_units(&self, kind: BarKind) -> (f32, f32, f32) {
+        match kind {
+            BarKind::Tree => {
+                let total = self
+                    .open
+                    .as_ref()
+                    .map(|open| open.tree.visible().len())
+                    .unwrap_or(0) as f32;
+                let offset = self.open.as_ref().map(|open| open.tree.scroll).unwrap_or(0) as f32;
+                (offset, self.tree_rows.max(1) as f32, total)
+            }
+            BarKind::Notes => {
+                let (offset, total) = self
+                    .open
+                    .as_ref()
+                    .map(|open| {
+                        (
+                            open.editor.visual_origin(self.wrap_width) as f32,
+                            open.editor.visual_len(self.wrap_width) as f32,
+                        )
+                    })
+                    .unwrap_or((0.0, 0.0));
+                (offset, self.text_rows.max(1) as f32, total)
+            }
+            BarKind::Preview => (
+                self.preview_px,
+                self.preview_view_h.max(1.0),
+                self.preview_content,
+            ),
+        }
+    }
+
+    fn set_tree_offset(&mut self, offset: f32) {
+        let rows = self.tree_rows.max(1);
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        let max = open.tree.visible().len().saturating_sub(rows);
+        let next = offset.round().max(0.0) as usize;
+        open.tree.scroll = next.min(max);
+        open.pane_tree = true;
+        open.focus_preview = false;
+    }
+
+    fn set_notes_offset(&mut self, offset: f32) {
+        let rows = self.text_rows.max(1);
+        let width = self.wrap_width;
+        let Some(open) = &mut self.open else {
+            return;
+        };
+        let current = open.editor.visual_origin(width) as isize;
+        let delta = offset.round() as isize - current;
+        open.editor.scroll_wrapped(delta, rows, width);
+        open.pane_tree = false;
+        open.focus_preview = false;
     }
 
     fn later(&mut self) {
@@ -3982,6 +4351,13 @@ impl Shell {
     fn open_theme(&mut self) {
         self.help = false;
         self.leader = Leader::None;
+        self.font_snapshot = (self.mono.clone(), self.sans.clone());
+        self.families = installed_families();
+        self.ensure_faces_listed();
+        self.appear = AppearSection::Theme;
+        self.font_filter = None;
+        self.family_selected = 0;
+        self.family_scroll = 0;
         let picker = ThemePicker::new(
             self.palette.clone(),
             extra_theme_fields(),
@@ -3999,6 +4375,16 @@ impl Shell {
     fn handle_theme_key(&mut self, press: KeyPress<'_>) -> Effect {
         if !press.control && is_fn(press, 2) {
             self.close_theme(true);
+            return Effect::None;
+        }
+        if self.font_filter.is_some() && self.appear != AppearSection::Theme {
+            return self.handle_font_filter(press);
+        }
+        if self.appear != AppearSection::Theme {
+            return self.handle_font_section(press);
+        }
+        if !press.control && press.key_char == Some("f") && !self.editing_hex() {
+            self.cycle_appear();
             return Effect::None;
         }
         let Some(key) = editor_key(press.key, press.key_char, press.control) else {
@@ -4037,18 +4423,14 @@ impl Shell {
                 editor.save_target = picker.save_target;
                 self.theme_editor = Some(editor);
             }
-            PickerOutcome::RequestSave => {
-                let saved = self
-                    .theme_picker
-                    .as_ref()
-                    .map(|picker| (picker.palette.clone(), picker.save_target));
-                if let Some((palette, target)) = saved {
-                    self.save_theme_palette(palette, target);
-                }
-            }
+            PickerOutcome::RequestSave => self.request_save_theme(),
             PickerOutcome::Error(msg) => push_toast(&mut self.toasts, ToastLevel::Error, msg),
             PickerOutcome::Closed { .. } => self.close_theme(true),
-            PickerOutcome::None => {}
+            PickerOutcome::None => {
+                if theme_motion(key) {
+                    self.preview_theme_row();
+                }
+            }
         }
     }
 
@@ -4073,13 +4455,7 @@ impl Shell {
                     self.apply_live_palette(palette);
                 }
             }
-            EditorOutcome::RequestSave => {
-                if let Some(editor) = self.theme_editor.as_ref() {
-                    let palette = editor.palette.clone();
-                    let target = editor.save_target;
-                    self.save_theme_palette(palette, target);
-                }
-            }
+            EditorOutcome::RequestSave => self.request_save_theme(),
             EditorOutcome::Closed { .. } => {
                 if self.theme_picker.is_some() {
                     if let Some(editor) = self.theme_editor.take() {
@@ -4110,13 +4486,25 @@ impl Shell {
                 editor.revert();
                 self.apply_live_palette(editor.palette);
             }
+            let mono = self.font_snapshot.0.clone();
+            let sans = self.font_snapshot.1.clone();
+            if mono != self.mono || sans != self.sans {
+                self.mono = mono;
+                self.sans = sans;
+                self.note_font_change();
+            }
         }
         self.theme_picker = None;
         self.theme_editor = None;
+        self.appear = AppearSection::Theme;
+        self.font_filter = None;
     }
 
     fn apply_live_palette(&mut self, palette: Palette) {
         let resolved = apply_omarchy(&palette, &self.omarchy).unwrap_or(palette);
+        if self.palette == resolved {
+            return;
+        }
         self.palette = resolved.clone();
         self.theme = from_palette(resolved);
         self.preview_cache = None;
@@ -4138,9 +4526,12 @@ impl Shell {
             &fields,
         ) {
             Ok(path) => {
+                self.commit_fonts();
                 self.apply_live_palette(palette);
                 self.theme_editor = None;
                 self.theme_picker = None;
+                self.appear = AppearSection::Theme;
+                self.font_filter = None;
                 push_toast(
                     &mut self.toasts,
                     ToastLevel::Success,
@@ -4168,27 +4559,86 @@ impl Shell {
         fields
     }
 
-    fn theme_overlay(&self) -> OverlayView {
-        if let Some(editor) = &self.theme_editor {
-            return editor_overlay(editor, self.visible_rows());
-        }
-        let Some(picker) = &self.theme_picker else {
-            return OverlayView {
-                title: "Theme".into(),
-                query: String::new(),
-                lines: Vec::new(),
-                warn: false,
-            };
+    fn appearance_view(&self) -> AppearanceView {
+        let rows = self.sheet_list_rows();
+        let (title, hint, lines) = if self.appear != AppearSection::Theme {
+            self.font_section_view(rows)
+        } else if let Some(editor) = &self.theme_editor {
+            (
+                "Appearance · colors".into(),
+                format!(
+                    "save {}    Tab target    y save    R reset    f fonts    Esc revert",
+                    editor.save_target.label()
+                ),
+                color_lines(editor, rows),
+            )
+        } else if let Some(picker) = &self.theme_picker {
+            (
+                "Appearance".into(),
+                format!(
+                    "j/k live    e colors    y save {}    f fonts    Esc revert",
+                    picker.save_target.label()
+                ),
+                theme_lines(picker, rows),
+            )
+        } else {
+            ("Appearance".into(), String::new(), Vec::new())
         };
-        picker_overlay(picker, self.visible_rows())
+        AppearanceView {
+            title,
+            hint,
+            lines,
+            editor_font: self.mono.clone(),
+            preview_font: self.sans.clone(),
+            editor_on: self.appear == AppearSection::Mono,
+            preview_on: self.appear == AppearSection::Sans,
+        }
     }
 
-    fn visible_rows(&self) -> usize {
-        self.help_view.max(8).saturating_sub(2)
+    fn font_section_view(&self, rows: usize) -> (String, String, Vec<AppearLine>) {
+        let choices = self.font_choices();
+        let live = self.live_family();
+        let title = match self.appear {
+            AppearSection::Sans => "Appearance · preview font",
+            _ => "Appearance · editor font",
+        };
+        let hint = if let Some(query) = &self.font_filter {
+            format!("/{query}    arrows move    Enter keep    Esc clear")
+        } else {
+            "j/k live    Enter keep    / filter    f cycle    h back    s save".into()
+        };
+        let start = self.family_scroll.min(choices.len());
+        let mut lines: Vec<AppearLine> = choices
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(rows)
+            .map(|(index, name)| AppearLine {
+                text: name.clone(),
+                selected: name == &live,
+                action: AppearAction::Family(index),
+            })
+            .collect();
+        if lines.is_empty() {
+            lines.push(AppearLine {
+                text: "(no matching fonts)".into(),
+                selected: false,
+                action: AppearAction::None,
+            });
+        }
+        (title.into(), hint, lines)
+    }
+
+    fn sheet_list_rows(&self) -> usize {
+        self.help_view.max(10).saturating_sub(5).max(3)
     }
 
     fn scroll_theme(&mut self, rows: isize) {
         if rows == 0 {
+            return;
+        }
+        if self.appear != AppearSection::Theme {
+            self.nudge_font(rows);
             return;
         }
         let delta = rows as i32;
@@ -4197,9 +4647,329 @@ impl Shell {
             editor.select(next.max(0) as usize);
             return;
         }
-        if let Some(picker) = self.theme_picker.as_mut() {
+        let changed = if let Some(picker) = self.theme_picker.as_mut() {
+            let before = picker.selected;
             let next = picker.selected as i32 + delta;
             picker.select(next.max(0) as usize);
+            picker.selected != before
+        } else {
+            false
+        };
+        if changed {
+            self.preview_theme_row();
+        }
+    }
+
+    fn preview_theme_row(&mut self) {
+        let outcome = {
+            let Some(picker) = self.theme_picker.as_mut() else {
+                return;
+            };
+            picker.preview_selected()
+        };
+        match outcome {
+            PickerOutcome::Applied => {
+                let palette = self
+                    .theme_picker
+                    .as_ref()
+                    .map(|picker| picker.palette.clone());
+                if let Some(palette) = palette {
+                    self.apply_live_palette(palette);
+                }
+            }
+            PickerOutcome::Error(msg) => push_toast(&mut self.toasts, ToastLevel::Error, msg),
+            _ => {}
+        }
+    }
+
+    fn pick_theme_row(&mut self, index: usize) {
+        if let Some(picker) = self.theme_picker.as_mut() {
+            picker.select(index);
+        } else {
+            return;
+        }
+        self.preview_theme_row();
+    }
+
+    fn request_save_theme(&mut self) {
+        let saved = if let Some(editor) = &self.theme_editor {
+            Some((editor.palette.clone(), editor.save_target))
+        } else {
+            self.theme_picker
+                .as_ref()
+                .map(|picker| (picker.palette.clone(), picker.save_target))
+        };
+        if let Some((palette, target)) = saved {
+            self.save_theme_palette(palette, target);
+        }
+    }
+
+    fn editing_hex(&self) -> bool {
+        self.theme_editor
+            .as_ref()
+            .is_some_and(|editor| editor.editing_hex)
+    }
+
+    fn gui_config_path(&self) -> PathBuf {
+        self.paths.ldnddev_dir().join("config.toml")
+    }
+
+    fn fonts_dirty(&self) -> bool {
+        self.mono != self.font_saved.0 || self.sans != self.font_saved.1
+    }
+
+    fn commit_fonts(&mut self) -> bool {
+        if !self.fonts_dirty() {
+            self.font_snapshot = (self.mono.clone(), self.sans.clone());
+            return true;
+        }
+        let fonts = GuiFonts {
+            mono: self.mono.clone(),
+            sans: self.sans.clone(),
+        };
+        match fonts.save(&self.gui_config_path()) {
+            Ok(()) => {
+                self.font_saved = (self.mono.clone(), self.sans.clone());
+                self.font_snapshot = self.font_saved.clone();
+                true
+            }
+            Err(err) => {
+                push_toast(
+                    &mut self.toasts,
+                    ToastLevel::Error,
+                    format!("Font save failed: {err}"),
+                );
+                false
+            }
+        }
+    }
+
+    fn keep_fonts(&mut self) {
+        let dirty = self.fonts_dirty();
+        if !self.commit_fonts() {
+            return;
+        }
+        if dirty {
+            push_toast(&mut self.toasts, ToastLevel::Success, "Fonts saved");
+        }
+        self.font_filter = None;
+        self.appear = AppearSection::Theme;
+    }
+
+    fn note_font_change(&mut self) {
+        self.preview_cache = None;
+        self.char_w = px(0.);
+        self.measured_mono.clear();
+    }
+
+    fn ensure_faces_listed(&mut self) {
+        for name in [self.mono.clone(), self.sans.clone()] {
+            if !name.is_empty() && !self.families.iter().any(|have| have == &name) {
+                self.families.push(name);
+            }
+        }
+        self.families.sort_by_key(|name| name.to_lowercase());
+    }
+
+    fn live_family(&self) -> String {
+        match self.appear {
+            AppearSection::Sans => self.sans.clone(),
+            _ => self.mono.clone(),
+        }
+    }
+
+    fn font_choices(&self) -> Vec<String> {
+        let Some(query) = self.font_filter.as_deref() else {
+            return self.families.clone();
+        };
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return self.families.clone();
+        }
+        self.families
+            .iter()
+            .filter(|name| name.to_lowercase().contains(&query))
+            .cloned()
+            .collect()
+    }
+
+    fn retarget_font_highlight(&mut self) {
+        let choices = self.font_choices();
+        let live = self.live_family();
+        self.family_selected = choices.iter().position(|name| name == &live).unwrap_or(0);
+        self.family_scroll = 0;
+        self.reveal_family();
+    }
+
+    fn reveal_family(&mut self) {
+        let span = self.sheet_list_rows().saturating_sub(1);
+        if self.family_selected < self.family_scroll {
+            self.family_scroll = self.family_selected;
+        } else if self.family_selected > self.family_scroll + span {
+            self.family_scroll = self.family_selected - span;
+        }
+    }
+
+    fn apply_font_choice(&mut self, name: &str) {
+        let slot = match self.appear {
+            AppearSection::Sans => &mut self.sans,
+            AppearSection::Mono => &mut self.mono,
+            AppearSection::Theme => return,
+        };
+        if slot == name {
+            return;
+        }
+        *slot = name.to_string();
+        self.note_font_change();
+    }
+
+    fn nudge_font(&mut self, delta: isize) {
+        let choices = self.font_choices();
+        if choices.is_empty() {
+            return;
+        }
+        let last = choices.len() - 1;
+        let live = self.live_family();
+        let base = choices.iter().position(|name| name == &live);
+        let next = match (delta, base) {
+            (isize::MAX, _) => last,
+            (isize::MIN, _) => 0,
+            (_, Some(index)) => {
+                let cur = index as isize + delta;
+                cur.clamp(0, last as isize) as usize
+            }
+            (_, None) if delta < 0 => last,
+            (_, None) => 0,
+        };
+        self.family_selected = next;
+        self.reveal_family();
+        let name = choices[next].clone();
+        self.apply_font_choice(&name);
+    }
+
+    fn choose_family(&mut self, index: usize) {
+        let choices = self.font_choices();
+        let Some(name) = choices.get(index).cloned() else {
+            return;
+        };
+        self.family_selected = index;
+        self.reveal_family();
+        self.apply_font_choice(&name);
+    }
+
+    fn cycle_appear(&mut self) {
+        let next = match self.appear {
+            AppearSection::Theme => AppearSection::Mono,
+            AppearSection::Mono => AppearSection::Sans,
+            AppearSection::Sans => AppearSection::Theme,
+        };
+        self.font_filter = None;
+        if next == AppearSection::Theme {
+            self.appear = AppearSection::Theme;
+        } else {
+            self.focus_fonts(next);
+        }
+    }
+
+    fn focus_fonts(&mut self, section: AppearSection) {
+        self.appear = section;
+        self.font_filter = None;
+        self.retarget_font_highlight();
+    }
+
+    fn handle_font_section(&mut self, press: KeyPress<'_>) -> Effect {
+        if press.key == "escape" {
+            self.close_theme(true);
+            return Effect::None;
+        }
+        if press.control {
+            return Effect::None;
+        }
+        if press.key_char == Some("f") {
+            self.cycle_appear();
+            return Effect::None;
+        }
+        if press.key == "/" || press.key_char == Some("/") {
+            self.font_filter = Some(String::new());
+            self.retarget_font_highlight();
+            return Effect::None;
+        }
+        if matches!(press.key, "left" | "h") || press.key_char == Some("h") {
+            self.appear = AppearSection::Theme;
+            self.font_filter = None;
+            return Effect::None;
+        }
+        if press.key == "enter" || press.key == "return" {
+            self.keep_fonts();
+            return Effect::None;
+        }
+        if matches!(
+            press.key_char,
+            Some("s") | Some("S") | Some("y") | Some("Y")
+        ) {
+            self.request_save_theme();
+            return Effect::None;
+        }
+        if let Some(delta) = font_delta(press) {
+            self.nudge_font(delta);
+        }
+        Effect::None
+    }
+
+    fn handle_font_filter(&mut self, press: KeyPress<'_>) -> Effect {
+        if press.control {
+            return Effect::None;
+        }
+        if press.key == "escape" {
+            self.font_filter = None;
+            self.retarget_font_highlight();
+            return Effect::None;
+        }
+        if press.key == "enter" || press.key == "return" {
+            self.keep_fonts();
+            return Effect::None;
+        }
+        if press.key == "backspace" {
+            if let Some(query) = self.font_filter.as_mut() {
+                query.pop();
+            }
+            self.retarget_font_highlight();
+            return Effect::None;
+        }
+        if let Some(delta) = font_arrow_delta(press) {
+            self.nudge_font(delta);
+            return Effect::None;
+        }
+        if let Some(text) = press.key_char.filter(|text| text.chars().count() == 1)
+            && let Some(ch) = text.chars().next()
+            && !ch.is_control()
+        {
+            if let Some(query) = self.font_filter.as_mut() {
+                query.push(ch);
+            }
+            self.retarget_font_highlight();
+        }
+        Effect::None
+    }
+
+    fn appear_click(&mut self, action: AppearAction) {
+        match action {
+            AppearAction::None => {}
+            AppearAction::Theme(index) => self.pick_theme_row(index),
+            AppearAction::Color(index) => {
+                if let Some(editor) = self.theme_editor.as_mut() {
+                    editor.select(index);
+                }
+            }
+            AppearAction::Family(index) => self.choose_family(index),
+            AppearAction::Focus(section) => {
+                self.font_filter = None;
+                if section == AppearSection::Theme {
+                    self.appear = AppearSection::Theme;
+                } else {
+                    self.focus_fonts(section);
+                }
+            }
         }
     }
 
@@ -4290,6 +5060,9 @@ impl Render for Shell {
         let notice = self.notice.clone();
         let picker = self.picker.clone();
         let picker_selected = self.picker_selected;
+        let tree_edge = self.hit.tree_pane;
+        let preview_edge = self.hit.preview_pane;
+        let notes_edge = self.hit.notes_pane;
         div()
             .id("shell")
             .track_focus(&focus)
@@ -4304,13 +5077,13 @@ impl Render for Shell {
             .flex_col()
             .bg(rgb(theme.base_background))
             .text_color(rgb(theme.text_primary))
-            .font_family(FONT_FAMILY)
+            .font_family(self.mono.clone())
             .text_size(px(FONT))
             .line_height(px(LINE))
             .child(header(&theme, &frame))
             .child(match &frame.body {
                 Body::Picker => picker_body(&theme, &picker, picker_selected, notice),
-                Body::Vault(panes) => vault_body(&theme, panes, entity),
+                Body::Vault(panes) => vault_body(&theme, panes, entity.clone()),
             })
             .when(frame.ai_float.is_some(), |this| {
                 this.child(ai_float_card(
@@ -4347,14 +5120,18 @@ impl Render for Shell {
                 ))
             })
             .when(frame.theme_panel.is_some(), |this| {
-                this.child(sheet_panel(
+                this.child(appearance_sheet(
                     &theme,
-                    frame.theme_panel.as_ref().unwrap_or(&OverlayView {
+                    frame.theme_panel.as_ref().unwrap_or(&AppearanceView {
                         title: String::new(),
-                        query: String::new(),
+                        hint: String::new(),
                         lines: Vec::new(),
-                        warn: false,
+                        editor_font: String::new(),
+                        preview_font: String::new(),
+                        editor_on: false,
+                        preview_on: false,
                     }),
+                    entity.clone(),
                 ))
             })
             .when(!frame.toasts.is_empty(), |this| {
@@ -4366,6 +5143,15 @@ impl Render for Shell {
                 this.child(toast_stack(&theme, &frame.toasts, lift))
             })
             .child(footer(&theme, &frame.footer))
+            .when(frame.live_pointer, |shell| {
+                shell.child(resize_strips(tree_edge, preview_edge, notes_edge))
+            })
+            .when(frame.split_cursor == Some(SplitDrag::Tree), |shell| {
+                shell.child(div().absolute().size_full().cursor_col_resize())
+            })
+            .when(frame.split_cursor == Some(SplitDrag::Preview), |shell| {
+                shell.child(div().absolute().size_full().cursor_row_resize())
+            })
     }
 }
 
@@ -4516,6 +5302,9 @@ fn editor_column(
             notes_pane(theme, notes, entity.clone())
                 .flex_grow(grow)
                 .flex_shrink(1.)
+                // An auto basis grows with the document, the viewport becomes
+                // the content, and the wheel clamps back to the top.
+                .flex_basis(px(0.))
                 .min_h(px(0.)),
         );
     }
@@ -4525,7 +5314,12 @@ fn editor_column(
             column.child(pane.h(px(height)).flex_shrink(0.).min_h(px(0.)))
         } else {
             let grow = if notes.is_some() { 2.0 } else { 1.0 };
-            column.child(pane.flex_grow(grow).flex_shrink(1.).min_h(px(0.)))
+            column.child(
+                pane.flex_grow(grow)
+                    .flex_shrink(1.)
+                    .flex_basis(px(0.))
+                    .min_h(px(0.)),
+            )
         };
     }
     if let Some(ai) = ai {
@@ -4534,6 +5328,7 @@ fn editor_column(
             ai_pane(theme, ai)
                 .flex_grow(grow)
                 .flex_shrink(1.)
+                .flex_basis(px(0.))
                 .min_h(px(0.)),
         );
     }
@@ -4637,25 +5432,64 @@ fn tree_pane(theme: &GuiTheme, tree: &TreeView, entity: Entity<Shell>) -> gpui::
         })
 }
 
-fn tree_rows(theme: &GuiTheme, tree: &TreeView, entity: Entity<Shell>) -> gpui::Div {
-    let rows = tree.rows.clone();
+fn scroll_document(height: f32) -> gpui::Div {
+    let height = height.max(1.0);
+    div().relative().w_full().h(px(height)).min_h(px(height))
+}
+
+/// Absolute, so a tall document cannot grow the pane. The wheel updates
+/// `handle`; the next frame copies that offset into the model.
+fn y_scroll(
+    id: &'static str,
+    handle: &ScrollHandle,
+    document: gpui::Div,
+) -> gpui::Stateful<gpui::Div> {
     div()
-        .flex_1()
-        .relative()
-        .overflow_hidden()
-        .children(rows.iter().map(|row| {
+        .id(id)
+        .absolute()
+        .size_full()
+        .overflow_y_scroll()
+        .line_height(px(LINE))
+        .track_scroll(handle)
+        .child(document)
+}
+
+fn tree_rows(theme: &GuiTheme, tree: &TreeView, entity: Entity<Shell>) -> gpui::Div {
+    let mut document = scroll_document(tree.content_h);
+    for (i, row) in tree.rows.iter().enumerate() {
+        let top = (tree.origin + i) as f32 * LINE;
+        document = document.child(
             div()
+                .absolute()
+                .top(px(top))
+                .left(px(0.))
+                .right(px(0.))
                 .h(px(LINE))
                 .flex_shrink_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .px(px(4.))
+                .pl(px(4.))
+                .pr(px(4. + BAR_W))
                 .when(row.selected && tree.focused, |line| {
                     line.bg(rgb(theme.selected_background))
                 })
                 .text_color(rgb(row.color))
-                .child(row.label.clone())
-        }))
+                .child(row.label.clone()),
+        );
+    }
+    div()
+        .flex_1()
+        .min_h(px(0.))
+        .relative()
+        .overflow_hidden()
+        .child(y_scroll("tree-scroll", &tree.port, document))
+        .when(tree.bar.is_some(), |area| {
+            area.child(scroll_bar(
+                theme,
+                tree.bar.as_ref().unwrap(),
+                entity.clone(),
+            ))
+        })
         .child(
             canvas(
                 move |bounds, _, cx| {
@@ -4698,10 +5532,23 @@ fn notes_pane(theme: &GuiTheme, notes: &NotesView, entity: Entity<Shell>) -> gpu
 }
 
 fn notes_rows(theme: &GuiTheme, notes: &NotesView, entity: Entity<Shell>) -> gpui::Div {
-    let mut area = div().flex_1().relative().overflow_hidden();
-    for row in &notes.rows {
-        area = area.child(note_line(theme, row));
+    let mut document = scroll_document(notes.content_h);
+    for (i, row) in notes.rows.iter().enumerate() {
+        let top = (notes.origin + i) as f32 * LINE;
+        document = document.child(
+            note_line(theme, row)
+                .absolute()
+                .top(px(top))
+                .left(px(0.))
+                .right(px(0.)),
+        );
     }
+    let mut area = div()
+        .flex_1()
+        .min_h(px(0.))
+        .relative()
+        .overflow_hidden()
+        .child(y_scroll("notes-scroll", &notes.port, document));
     if let Some(origin) = notes.caret_bar {
         area = area.child(
             div()
@@ -4712,6 +5559,9 @@ fn notes_rows(theme: &GuiTheme, notes: &NotesView, entity: Entity<Shell>) -> gpu
                 .h(px(LINE))
                 .bg(rgb(theme.cursor)),
         );
+    }
+    if let Some(bar) = &notes.bar {
+        area = area.child(scroll_bar(theme, bar, entity.clone()));
     }
     area.child(
         canvas(
@@ -4737,7 +5587,15 @@ fn note_line(theme: &GuiTheme, row: &EditorRow) -> gpui::Div {
                 .text_color(rgb(theme.text_disabled))
                 .child(row.gutter.clone()),
         )
-        .child(styled_line(theme, row))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
+                .pr(px(BAR_W))
+                .cursor_text()
+                .child(styled_line(theme, row)),
+        )
 }
 
 fn styled_line(theme: &GuiTheme, row: &EditorRow) -> StyledText {
@@ -4792,9 +5650,23 @@ fn preview_pane(theme: &GuiTheme, preview: &PreviewView, entity: Entity<Shell>) 
     } else {
         theme.text_secondary
     };
-    let mut area = div().flex_1().relative().overflow_hidden();
-    for row in &preview.rows {
-        area = area.child(preview_line(theme, row));
+    let mut area = div().flex_1().min_h(px(0.)).relative().overflow_hidden();
+    if let Some(message) = &preview.message {
+        area = area.child(
+            div()
+                .px(px(8.))
+                .text_color(rgb(theme.text_secondary))
+                .child(message.clone()),
+        );
+    } else {
+        area = area.child(y_scroll(
+            "preview-scroll",
+            &preview.port,
+            preview_column(theme, preview, entity.clone()),
+        ));
+    }
+    if let Some(bar) = &preview.bar {
+        area = area.child(scroll_bar(theme, bar, entity.clone()));
     }
     div()
         .min_w(px(0.))
@@ -4823,67 +5695,369 @@ fn preview_pane(theme: &GuiTheme, preview: &PreviewView, entity: Entity<Shell>) 
         )
 }
 
-fn preview_line(theme: &GuiTheme, row: &PreviewPaint) -> gpui::Div {
-    let mut line = div()
-        .h(px(row.height))
-        .flex_shrink_0()
-        .overflow_hidden()
-        .px(px(8.));
-    if row.cursor {
-        line = line
-            .bg(rgb(theme.cursor))
-            .text_color(rgb(theme.base_background));
-    } else if row.selected {
-        line = line
-            .bg(rgb(theme.selected_background))
-            .text_color(rgb(theme.text_active_focus));
+struct Faces<'a> {
+    mono: &'a str,
+    sans: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct PreviewSlice {
+    scroll_px: f32,
+    view_h: f32,
+    cursor: Option<usize>,
+    selected: Option<(usize, usize)>,
+}
+
+fn preview_column(theme: &GuiTheme, preview: &PreviewView, entity: Entity<Shell>) -> gpui::Div {
+    let paint = PreviewSlice {
+        scroll_px: preview.scroll_px,
+        view_h: preview.view_h,
+        cursor: preview.cursor,
+        selected: preview.selected,
+    };
+    let faces = Faces {
+        mono: preview.mono.as_str(),
+        sans: preview.sans.as_str(),
+    };
+    let view_bottom = paint.scroll_px + paint.view_h;
+    let mut y = 0.0;
+    let mut shown = Vec::new();
+    for (index, block) in preview.blocks.iter().enumerate() {
+        let next = y + block.height;
+        if next > paint.scroll_px && y < view_bottom {
+            shown.push((index, y));
+        }
+        y = next;
     }
-    if let Some(image) = &row.image {
+    let mut column = scroll_document(preview.content_h).mr(px(BAR_W));
+    for (index, top) in shown {
+        column = column.child(
+            preview_block(
+                theme,
+                &preview.blocks[index],
+                index,
+                top,
+                paint,
+                &faces,
+                entity.clone(),
+            )
+            .absolute()
+            .top(px(top))
+            .left(px(0.)),
+        );
+    }
+    column
+}
+
+fn preview_block(
+    theme: &GuiTheme,
+    block: &RichBlock,
+    index: usize,
+    top: f32,
+    paint: PreviewSlice,
+    faces: &Faces<'_>,
+    entity: Entity<Shell>,
+) -> gpui::Div {
+    let cursor = paint.cursor == Some(index);
+    let selected = paint
+        .selected
+        .is_some_and(|(start, end)| index >= start && index <= end);
+    let color = block_color(theme, block);
+    let family = if block.mono { faces.mono } else { faces.sans };
+    let mut body = div()
+        .w_full()
+        .h(px(block.height))
+        .overflow_hidden()
+        .relative()
+        .font_family(family)
+        .text_size(px(block.size))
+        .line_height(px(block.line_h))
+        .text_color(rgb(color));
+    if block.kind == dd_render::BlockKind::Quote {
+        body = body
+            .border_l(px(2.))
+            .border_color(rgb(theme.text_secondary));
+    }
+    if cursor {
+        body = body
+            .bg(rgb(theme.selected_background))
+            .border_l(px(2.))
+            .border_color(rgb(theme.cursor));
+    } else if selected {
+        body = body.bg(rgb(theme.selected_background));
+    }
+    if block.kind == dd_render::BlockKind::Heading {
+        body = body.font_weight(FontWeight::BOLD);
+    }
+    if block.kind == dd_render::BlockKind::Rule {
+        return body.child(
+            div()
+                .mt(px(5.))
+                .mx(px(8.))
+                .h(px(1.))
+                .bg(rgb(theme.border_default)),
+        );
+    }
+    if let Some(image) = &block.image {
         let picture = Arc::new(Image::from_bytes(ImageFormat::Png, image.png.clone()));
-        line.child(
+        let h = (block.height - 8.0).max(LINE);
+        return body.px(px(8.)).child(
             img(picture)
-                .h(px(row.height))
+                .h(px(h))
                 .w_full()
                 .object_fit(ObjectFit::Contain),
-        )
-    } else if row.cursor || row.selected {
-        line.child(if row.text.is_empty() {
-            " ".to_string()
-        } else {
-            row.text.clone()
-        })
+        );
+    }
+    body = body.pl(px(8. + f32::from(block.depth) * 16.)).pr(px(12.));
+    let skip = line_skip(top, block.line_h, paint.scroll_px, block.lines.len());
+    let take = ((paint.view_h / block.line_h.max(1.0)).ceil() as usize).saturating_add(2);
+    let mut lines = div().w_full();
+    if skip > 0 {
+        lines = lines.child(div().h(px(skip as f32 * block.line_h)));
+    }
+    if !block.marker.is_empty() {
+        lines = lines.child(preview_item(theme, block, skip, take, faces, entity));
     } else {
-        line.child(preview_styled(theme, row))
+        for line in block.lines.iter().skip(skip).take(take) {
+            lines = lines.child(preview_line(theme, block, line, faces, entity.clone()));
+        }
+    }
+    body.child(lines)
+}
+
+fn preview_item(
+    theme: &GuiTheme,
+    block: &RichBlock,
+    skip: usize,
+    take: usize,
+    faces: &Faces<'_>,
+    entity: Entity<Shell>,
+) -> gpui::Div {
+    let marker_w = (block.marker.chars().count() as f32 * block.size * 0.55).max(block.size);
+    let mut text = div().flex_1().min_w(px(0.));
+    for (i, line) in block.lines.iter().enumerate().skip(skip).take(take) {
+        let mut row = div()
+            .h(px(block.line_h))
+            .flex()
+            .flex_row()
+            .overflow_hidden();
+        if i == 0 {
+            row = row.child(
+                div()
+                    .w(px(marker_w))
+                    .flex_shrink_0()
+                    .child(block.marker.clone()),
+            );
+        } else {
+            row = row.child(div().w(px(marker_w)).flex_shrink_0());
+        }
+        row = row.child(preview_runs(theme, block, line, faces, entity.clone()));
+        text = text.child(row);
+    }
+    text
+}
+
+fn preview_line(
+    theme: &GuiTheme,
+    block: &RichBlock,
+    line: &[RichRun],
+    faces: &Faces<'_>,
+    entity: Entity<Shell>,
+) -> gpui::Div {
+    div()
+        .h(px(block.line_h))
+        .overflow_hidden()
+        .child(preview_runs(theme, block, line, faces, entity))
+}
+
+fn preview_runs(
+    theme: &GuiTheme,
+    block: &RichBlock,
+    line: &[RichRun],
+    faces: &Faces<'_>,
+    entity: Entity<Shell>,
+) -> gpui::Div {
+    let mut row = div().flex().flex_row().overflow_hidden();
+    if line.is_empty() {
+        return row.child(" ");
+    }
+    for run in line {
+        row = row.child(preview_run(theme, block, run, faces, entity.clone()));
+    }
+    row
+}
+
+fn preview_run(
+    theme: &GuiTheme,
+    block: &RichBlock,
+    run: &RichRun,
+    faces: &Faces<'_>,
+    entity: Entity<Shell>,
+) -> gpui::Div {
+    let mut el = div().flex_shrink_0();
+    if run.bold || block.kind == dd_render::BlockKind::Heading {
+        el = el.font_weight(FontWeight::BOLD);
+    }
+    if run.italic {
+        el = el.italic();
+    }
+    if run.strike {
+        el = el.line_through();
+    }
+    if run.code {
+        el = el
+            .font_family(faces.mono)
+            .text_size(px(13.))
+            .px(px(2.))
+            .text_color(rgb(theme.files));
+    }
+    if run.link.is_empty() {
+        return el.child(run.text.clone());
+    }
+    let target = run.link.clone();
+    el.cursor_pointer()
+        .underline()
+        .text_color(rgb(theme.links))
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+            entity.update(cx, |shell, cx| {
+                cx.stop_propagation();
+                if shell.modal_up() {
+                    return;
+                }
+                shell.focus_preview_pane();
+                if event.modifiers.control {
+                    shell.open_external_raw(&target);
+                } else {
+                    let (dst, heading) = split_link(&target);
+                    shell.follow_target(&dst, heading.as_deref());
+                }
+            });
+        })
+        .child(run.text.clone())
+}
+
+fn scroll_bar(theme: &GuiTheme, bar: &BarPaint, entity: Entity<Shell>) -> gpui::Div {
+    let Some(thumb) = thumb_geom(bar.offset, bar.visible, bar.total, bar.track) else {
+        return div();
+    };
+    let kind = bar.kind;
+    let color = if bar.hot {
+        theme.scrollbar_hover
+    } else {
+        theme.scrollbar
+    };
+    div()
+        .absolute()
+        .right(px(0.))
+        .top(px(0.))
+        .w(px(BAR_W))
+        .h(px(bar.track.max(1.0)))
+        .cursor(gpui::CursorStyle::Arrow)
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+            entity.update(cx, |shell, cx| {
+                cx.stop_propagation();
+                shell.bar_down(kind, event);
+            });
+        })
+        .child(
+            div()
+                .absolute()
+                .top(px(thumb.y))
+                .left(px(2.))
+                .w(px(6.))
+                .h(px(thumb.h))
+                .bg(rgb(color)),
+        )
+}
+
+fn resize_strips(
+    tree: Option<Bounds<Pixels>>,
+    preview: Option<Bounds<Pixels>>,
+    notes: Option<Bounds<Pixels>>,
+) -> gpui::Div {
+    let mut layer = div().absolute().size_full();
+    if let Some(bounds) = tree {
+        let edge = bounds.origin.x + bounds.size.width;
+        layer = layer.child(
+            div()
+                .absolute()
+                .left(edge - px(6.))
+                .top(bounds.origin.y)
+                .w(px(12.))
+                .h(bounds.size.height)
+                .cursor_col_resize(),
+        );
+    }
+    if let (Some(preview), Some(notes)) = (preview, notes) {
+        let x0 = if notes.origin.x < preview.origin.x {
+            notes.origin.x
+        } else {
+            preview.origin.x
+        };
+        let notes_right = notes.origin.x + notes.size.width;
+        let preview_right = preview.origin.x + preview.size.width;
+        let right = if notes_right > preview_right {
+            notes_right
+        } else {
+            preview_right
+        };
+        layer = layer.child(
+            div()
+                .absolute()
+                .left(x0)
+                .top(preview.origin.y - px(6.))
+                .w((right - x0).max(px(0.)))
+                .h(px(12.))
+                .cursor_row_resize(),
+        );
+    }
+    layer
+}
+
+fn block_color(theme: &GuiTheme, block: &RichBlock) -> u32 {
+    match block.kind {
+        dd_render::BlockKind::Heading | dd_render::BlockKind::Banner => match block.level {
+            1 => theme.success,
+            2 => theme.text_active_focus,
+            3 => theme.warning,
+            4 => theme.error,
+            _ if block.kind == dd_render::BlockKind::Banner => theme.info,
+            _ => theme.text_labels,
+        },
+        dd_render::BlockKind::Quote => theme.text_secondary,
+        dd_render::BlockKind::Code | dd_render::BlockKind::Pre => theme.files,
+        _ => theme.text_primary,
     }
 }
 
-fn preview_styled(_theme: &GuiTheme, row: &PreviewPaint) -> StyledText {
-    let highlights = row.spans.iter().map(|span| {
-        let mut style = HighlightStyle {
-            color: Some(rgb(span.color).into()),
-            ..Default::default()
-        };
-        if span.bold {
-            style.font_weight = Some(FontWeight::BOLD);
+fn line_skip(top: f32, line_h: f32, scroll: f32, count: usize) -> usize {
+    if line_h <= 0.0 || top >= scroll {
+        return 0;
+    }
+    let skip = ((scroll - top) / line_h).floor() as usize;
+    skip.min(count)
+}
+
+fn blocks_fitting(heights: &[f32], start: usize, view: f32) -> usize {
+    let mut used = 0.0;
+    let mut count = 0usize;
+    for height in heights.iter().skip(start) {
+        if count > 0 && used + *height > view {
+            break;
         }
-        if span.italic {
-            style.font_style = Some(gpui::FontStyle::Italic);
+        used += *height;
+        count += 1;
+    }
+    count
+}
+
+fn split_link(raw: &str) -> (String, Option<String>) {
+    match raw.split_once('#') {
+        Some((dst, heading)) if !dst.is_empty() && !heading.is_empty() => {
+            (dst.to_string(), Some(heading.to_string()))
         }
-        if span.underline {
-            style.underline = Some(UnderlineStyle {
-                thickness: px(1.),
-                color: style.color,
-                wavy: false,
-            });
-        }
-        (span.bytes.clone(), style)
-    });
-    let text = if row.text.is_empty() {
-        " ".to_string()
-    } else {
-        row.text.clone()
-    };
-    StyledText::new(text).with_highlights(highlights)
+        _ => (raw.to_string(), None),
+    }
 }
 
 fn pane_title(text: &str, color: u32, theme: &GuiTheme) -> gpui::Div {
@@ -5128,15 +6302,6 @@ fn is_end(press: KeyPress<'_>) -> bool {
     !press.control && (press.key == "end" || typed_char(press) == Some('G'))
 }
 
-fn image_row_height(image: &PreviewImagePaint, pane_w: f32, max_rows: u16) -> f32 {
-    let max_h = LINE * f32::from(max_rows.max(1));
-    if image.width == 0 || image.height == 0 {
-        return LINE;
-    }
-    let aspect = image.height as f32 / image.width as f32;
-    (pane_w.max(LINE) * aspect).clamp(LINE, max_h.max(LINE))
-}
-
 fn attach_vault(vault: Vault) -> (OpenVault, Option<String>) {
     let config = VaultConfig::load_for(&vault, None);
     let mut wrap = config.wrap;
@@ -5273,6 +6438,44 @@ fn leader_footer(leader: Leader) -> Option<(&'static [&'static str], &'static st
     })
 }
 
+fn theme_motion(key: EditorKey) -> bool {
+    matches!(
+        key,
+        EditorKey::Down
+            | EditorKey::Up
+            | EditorKey::Char('j')
+            | EditorKey::Char('k')
+            | EditorKey::Char('g')
+            | EditorKey::Char('G')
+    )
+}
+
+fn font_delta(press: KeyPress<'_>) -> Option<isize> {
+    if press.key_char == Some("G") || press.key == "end" {
+        return Some(isize::MAX);
+    }
+    if press.key == "home" || press.key == "g" || press.key_char == Some("g") {
+        return Some(isize::MIN);
+    }
+    font_arrow_delta(press).or(match press.key {
+        "j" => Some(1),
+        "k" => Some(-1),
+        _ => None,
+    })
+}
+
+fn font_arrow_delta(press: KeyPress<'_>) -> Option<isize> {
+    match press.key {
+        "down" => Some(1),
+        "up" => Some(-1),
+        "end" => Some(isize::MAX),
+        "home" => Some(isize::MIN),
+        "pagedown" | "page_down" => Some(8),
+        "pageup" | "page_up" => Some(-8),
+        _ => None,
+    }
+}
+
 fn is_fn(press: KeyPress<'_>, n: u8) -> bool {
     if press.control {
         return false;
@@ -5301,43 +6504,31 @@ fn picker_label(row: &PickerRow) -> String {
     }
 }
 
-fn picker_overlay(picker: &ThemePicker, rows: usize) -> OverlayView {
-    let mut lines = vec![OverlayLine {
-        text: format!(
-            "Enter apply    e edit    y save {}    Esc revert",
-            picker.save_target.label()
-        ),
-        selected: false,
-    }];
+fn theme_lines(picker: &ThemePicker, rows: usize) -> Vec<AppearLine> {
     let start = picker.scroll.min(picker.rows.len());
-    for (i, row) in picker.rows.iter().enumerate().skip(start).take(rows) {
-        lines.push(OverlayLine {
+    picker
+        .rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(rows)
+        .map(|(index, row)| AppearLine {
             text: picker_label(row),
-            selected: i == picker.selected,
-        });
-    }
-    OverlayView {
-        title: "Theme".into(),
-        query: String::new(),
-        lines,
-        warn: false,
-    }
+            selected: index == picker.selected,
+            action: AppearAction::Theme(index),
+        })
+        .collect()
 }
 
-fn editor_overlay(editor: &ThemeEditor, rows: usize) -> OverlayView {
-    let mut lines = vec![OverlayLine {
-        text: format!(
-            "save {}    Tab local/global    y save    R reset    Esc revert",
-            editor.save_target.label()
-        ),
-        selected: false,
-    }];
+fn color_lines(editor: &ThemeEditor, rows: usize) -> Vec<AppearLine> {
     let view = theme_editor_rows(&editor.fields);
+    let mut lines = Vec::new();
     for row in view.iter().skip(editor.scroll.min(view.len())).take(rows) {
         match row {
-            ThemeEditorRow::Header(group) => lines.push(OverlayLine {
+            ThemeEditorRow::Header(group) => lines.push(AppearLine {
                 text: format!("— {group}"),
                 selected: false,
+                action: AppearAction::None,
             }),
             ThemeEditorRow::Color(idx) => {
                 let key = editor.fields.get(*idx).map(|field| field.key).unwrap_or("");
@@ -5353,19 +6544,15 @@ fn editor_overlay(editor: &ThemeEditor, rows: usize) -> OverlayView {
                     hex
                 };
                 let channel = ["R", "G", "B"][editor.channel.min(2)];
-                lines.push(OverlayLine {
+                lines.push(AppearLine {
                     text: format!("{key:<22} {shown_hex}  {channel}"),
                     selected,
+                    action: AppearAction::Color(*idx),
                 });
             }
         }
     }
-    OverlayView {
-        title: "Theme".into(),
-        query: String::new(),
-        lines,
-        warn: false,
-    }
+    lines
 }
 
 fn pane_bounds(
@@ -5392,12 +6579,94 @@ fn help_panel(theme: &GuiTheme, lines: &[String]) -> gpui::Div {
     panel
 }
 
-fn sheet_panel(theme: &GuiTheme, view: &OverlayView) -> gpui::Div {
-    let mut panel = sheet_frame(theme, &view.title);
+fn appearance_sheet(theme: &GuiTheme, view: &AppearanceView, entity: Entity<Shell>) -> gpui::Div {
+    let mut list = div().flex_1().min_h(px(0.)).overflow_hidden();
     for line in &view.lines {
-        panel = panel.child(sheet_line(theme, &line.text, line.selected));
+        list = list.child(appear_line(
+            theme,
+            &line.text,
+            line.selected,
+            line.action,
+            entity.clone(),
+        ));
     }
-    panel
+    div()
+        .absolute()
+        .top(px(CHROME))
+        .right(px(0.))
+        .bottom(px(CHROME))
+        .w(px(SHEET_W))
+        .max_w(relative(0.46))
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .px(px(8.))
+        .py(px(4.))
+        .bg(rgb(theme.modal_background))
+        .text_color(rgb(theme.modal_text))
+        .border_l_1()
+        .border_color(rgb(theme.border_default))
+        .child(sheet_heading(theme, &view.title))
+        .child(sheet_heading(theme, &view.hint))
+        .child(list)
+        .child(sheet_heading(theme, "Fonts"))
+        .child(appear_line(
+            theme,
+            &format!("Editor   {}", view.editor_font),
+            view.editor_on,
+            AppearAction::Focus(AppearSection::Mono),
+            entity.clone(),
+        ))
+        .child(appear_line(
+            theme,
+            &format!("Preview  {}", view.preview_font),
+            view.preview_on,
+            AppearAction::Focus(AppearSection::Sans),
+            entity,
+        ))
+}
+
+fn sheet_heading(theme: &GuiTheme, text: &str) -> gpui::Div {
+    div()
+        .h(px(LINE))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_color(rgb(theme.modal_header))
+        .child(if text.is_empty() {
+            " ".to_string()
+        } else {
+            text.to_string()
+        })
+}
+
+fn appear_line(
+    theme: &GuiTheme,
+    text: &str,
+    selected: bool,
+    action: AppearAction,
+    entity: Entity<Shell>,
+) -> gpui::Div {
+    let shown = if text.is_empty() {
+        " ".to_string()
+    } else {
+        text.to_string()
+    };
+    div()
+        .h(px(LINE))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .when(selected, |row| {
+            row.bg(rgb(theme.selected_background))
+                .text_color(rgb(theme.text_active_focus))
+        })
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            entity.update(cx, |shell, cx| {
+                cx.stop_propagation();
+                shell.appear_click(action);
+            });
+        })
+        .child(shown)
 }
 
 fn sheet_frame(theme: &GuiTheme, title: &str) -> gpui::Div {

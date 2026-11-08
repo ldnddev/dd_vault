@@ -256,7 +256,7 @@ fn fit_footer(width: u16, left: &[&str], middle: &[&str], right: &[&str]) -> Str
     }
 }
 
-const NOTES: &str = "Chrome follows LDNDDEV_TUI_VISUAL_STANDARD.md. Header is always 3 rows and footer 1, including zen. The tree lists one folder at a time (l enters, h returns) and reads files on disk; .dd_vault-*, .git, .gitignore, and db files are hidden. Long names keep their start and extension. External edits reload a clean buffer, or prompt Reload/Keep if dirty. Editor title shows git:clean / git:±N / git:conflict. :git commit scans for ghp_ / github_pat_ / AKIA / sk- / xai- / private keys and does not run repo hooks, fsmonitor, or repo aliases. Git refuses a vault config that rewrites remote URLs or sets a custom upload-pack or receive-pack program. Symlinks that point outside the vault are not opened. Overlapping pull conflicts write note.conflict-<ts>.md sidecars and keep the original. Ctrl+V pastes a clipboard image to assets/<note>-<ts>.png. Click/drag in the editor to place the caret or select; y on that selection copies it to the system clipboard. Drag the pane borders to resize. :daily and <Space>nd open notes/daily/YYYY-MM-DD.md. <Space><Space> is the command palette. Search matches frontmatter titles and aliases. gf / Enter follows [[wikilinks]] and local markdown links (creates a missing note after confirm). Ctrl+O / Ctrl+I walk the jump list. Reopening a vault restores the last note, caret, wrap, preview, splits, and zen/focus. AI is off until :ai on; each request asks consent. Default network provider is SpaceXAI (grok-4.6). :ai provider openrouter stores a key in ~/.config/ldnddev/ai.keys; :ai provider ollama talks to a local Ollama daemon. ```mermaid flowcharts, sequence diagrams, and pie charts draw as Unicode boxes in the preview. Narrow terminals hide the tree until <Space>e. This is the desktop window (dd_vault-gui), not the terminal.";
+const NOTES: &str = "Chrome follows LDNDDEV_TUI_VISUAL_STANDARD.md. Header is always 3 rows and footer 1, including zen. The tree lists one folder at a time (l enters, h returns) and reads files on disk; .dd_vault-*, .git, .gitignore, and db files are hidden. Long names keep their start and extension. External edits reload a clean buffer, or prompt Reload/Keep if dirty. Editor title shows git:clean / git:±N / git:conflict. :git commit scans for ghp_ / github_pat_ / AKIA / sk- / xai- / private keys and does not run repo hooks, fsmonitor, or repo aliases. Git refuses a vault config that rewrites remote URLs or sets a custom upload-pack or receive-pack program. Symlinks that point outside the vault are not opened. Overlapping pull conflicts write note.conflict-<ts>.md sidecars and keep the original. Ctrl+V pastes a clipboard image to assets/<note>-<ts>.png. Click/drag in the editor to place the caret or select; y on that selection copies it to the system clipboard. Drag the pane borders to resize. :daily and <Space>nd open notes/daily/YYYY-MM-DD.md. <Space><Space> is the command palette. Search matches frontmatter titles and aliases. gf / Enter follows [[wikilinks]] and local markdown links (creates a missing note after confirm). Ctrl+O / Ctrl+I walk the jump list. Reopening a vault restores the last note, caret, wrap, preview, splits, and zen/focus. AI is off until :ai on; each request asks consent. Default network provider is SpaceXAI (grok-4.6). :ai provider openrouter stores a key in ~/.config/ldnddev/ai.keys; :ai provider ollama talks to a local Ollama daemon. ```mermaid flowcharts, sequence diagrams, and pie charts draw as Unicode boxes in the preview. Narrow terminals hide the tree until <Space>e. The preview sets heading sizes, emphasis, and code in their own faces. F2 opens an appearance sheet beside the vault: the highlighted theme paints immediately, and the editor and preview faces come from the fonts installed on this machine. Scrollbars on the tree, notes, and preview follow the wheel and the keys. This is the desktop window (dd_vault-gui), not the terminal.";
 
 pub fn help_lines() -> Vec<String> {
     let mut lines = Vec::new();
@@ -265,7 +265,10 @@ pub fn help_lines() -> Vec<String> {
         "Global",
         &[
             ("F1", "Open/close this help"),
-            ("F2", "Omarchy themes (Enter apply, e edit, s save)"),
+            (
+                "F2",
+                "Appearance sheet beside the vault (j/k paints the theme, f switches fonts)",
+            ),
             ("Ctrl+Q", "Quit"),
             ("Tab", "Focus tree → editor → preview"),
             (
@@ -302,17 +305,28 @@ pub fn help_lines() -> Vec<String> {
     );
     add_section(
         &mut lines,
-        "Help / Theme overlays",
+        "Help / Appearance",
         &[
             ("F1 / Esc", "Close help"),
-            ("F2 / Esc", "Close theme (Esc reverts unsaved edits)"),
-            ("Enter", "Apply the highlighted Omarchy theme"),
-            ("e", "Edit colors for the applied theme"),
+            (
+                "F2 / Esc",
+                "Close the sheet (reverts an unsaved theme and unsaved fonts)",
+            ),
             (
                 "j/k or arrows",
-                "Move in the theme list or the color editor",
+                "Highlight a theme or font and paint it immediately",
             ),
-            ("Y / S", "Save the theme name (hex edits are overrides)"),
+            ("Enter", "Keep the highlighted font in the GUI config"),
+            ("e", "Edit colors for the applied theme"),
+            (
+                "f",
+                "Editor font, preview font, then back to the theme list",
+            ),
+            ("/", "Filter the font list"),
+            (
+                "Y / S",
+                "Save the theme file and any GUI font change (hex edits are overrides)",
+            ),
             ("Tab", "Toggle save target local ↔ global"),
             ("R", "Reset the color editor to the built-in palette"),
         ],
@@ -396,6 +410,8 @@ pub fn help_lines() -> Vec<String> {
                 "Drag pane border",
                 "Resize tree | editor or editor / preview",
             ),
+            ("Hover border", "Pointer changes to a column or row resize"),
+            ("Scrollbar", "Drag the thumb or click the track"),
         ],
     );
     lines.push("Notes".to_string());
