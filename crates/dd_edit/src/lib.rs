@@ -24,9 +24,14 @@ use ropey::Rope;
 
 mod error;
 mod keys;
+mod line;
 
 pub use error::Error;
 pub use keys::Key;
+pub use line::{
+    line_backspace, line_click, line_delete, line_end, line_home, line_insert, line_left, line_len,
+    line_parts, line_right,
+};
 
 const MAX_OPEN_BYTES: u64 = 2_000_000;
 
@@ -250,6 +255,8 @@ pub struct Editor {
     count: usize,
     pending: Pending,
     pub cmdline: String,
+    /// Character index into [`Self::cmdline`].
+    pub cmdline_cursor: usize,
 }
 
 impl Default for Editor {
@@ -284,7 +291,13 @@ impl Editor {
             count: 0,
             pending: Pending::None,
             cmdline: String::new(),
+            cmdline_cursor: 0,
         }
+    }
+
+    fn clear_cmdline(&mut self) {
+        self.cmdline = String::new();
+        self.cmdline_cursor = 0;
     }
 
     pub fn open(path: PathBuf, rel: String) -> Result<Self, Error> {
@@ -389,7 +402,7 @@ impl Editor {
     /// Click: place caret. Keeps INSERT; otherwise NORMAL. Clears visual.
     pub fn click_to(&mut self, line: usize, col: usize) {
         if matches!(self.mode, Mode::Command | Mode::Search | Mode::Visual) {
-            self.cmdline.clear();
+            self.clear_cmdline();
             self.visual_anchor = None;
             self.mode = Mode::Normal;
         }
@@ -401,7 +414,7 @@ impl Editor {
 
     /// Start a mouse selection (charwise or linewise visual).
     pub fn begin_mouse_select(&mut self, line: usize, col: usize, linewise: bool) {
-        self.cmdline.clear();
+        self.clear_cmdline();
         self.cursor = self.pos_at(line, col, true);
         self.visual_anchor = Some(self.cursor);
         self.visual_line = linewise;
@@ -657,7 +670,7 @@ impl Editor {
             _ => Mode::Normal,
         };
         self.visual_anchor = None;
-        self.cmdline.clear();
+        self.clear_cmdline();
         Ok(())
     }
 
@@ -712,6 +725,14 @@ impl Editor {
             Key::Backspace => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
+                    self.rope.remove(self.cursor..self.cursor + 1);
+                    self.dirty = true;
+                    self.sync_col();
+                }
+                Action::None
+            }
+            Key::Delete => {
+                if self.cursor < self.rope.len_chars() {
                     self.rope.remove(self.cursor..self.cursor + 1);
                     self.dirty = true;
                     self.sync_col();
@@ -935,12 +956,12 @@ impl Editor {
             }
             Key::Char('/') => {
                 self.mode = Mode::Search;
-                self.cmdline.clear();
+                self.clear_cmdline();
                 Action::None
             }
             Key::Char(':') => {
                 self.mode = Mode::Command;
-                self.cmdline.clear();
+                self.clear_cmdline();
                 Action::None
             }
             Key::Char('n') => {
@@ -991,61 +1012,50 @@ impl Editor {
     }
 
     fn handle_command(&mut self, key: Key) -> Action {
-        match key {
-            Key::Esc => {
-                self.mode = Mode::Normal;
-                self.cmdline.clear();
-                Action::None
-            }
-            Key::Backspace => {
-                if self.cmdline.is_empty() {
-                    self.mode = Mode::Normal;
-                } else {
-                    self.cmdline.pop();
-                }
-                Action::None
-            }
-            Key::Enter => {
-                let cmd = self.cmdline.trim().to_string();
-                self.cmdline.clear();
-                self.mode = Mode::Normal;
-                self.run_command(&cmd)
-            }
-            Key::Char(c) => {
-                self.cmdline.push(c);
-                Action::None
-            }
-            _ => Action::None,
+        if let Key::Enter = key {
+            let cmd = self.cmdline.trim().to_string();
+            self.clear_cmdline();
+            self.mode = Mode::Normal;
+            return self.run_command(&cmd);
         }
+        self.edit_cmdline(key);
+        Action::None
     }
 
     fn handle_search(&mut self, key: Key) -> Action {
+        if let Key::Enter = key {
+            self.search = self.cmdline.clone();
+            self.clear_cmdline();
+            self.mode = Mode::Normal;
+            self.find_next(true);
+            return Action::None;
+        }
+        self.edit_cmdline(key);
+        Action::None
+    }
+
+    /// Shared caret for `:` and `/`. Esc on either leaves the mode.
+    fn edit_cmdline(&mut self, key: Key) {
         match key {
             Key::Esc => {
                 self.mode = Mode::Normal;
-                self.cmdline.clear();
-                Action::None
+                self.clear_cmdline();
             }
             Key::Backspace => {
                 if self.cmdline.is_empty() {
                     self.mode = Mode::Normal;
+                    self.clear_cmdline();
                 } else {
-                    self.cmdline.pop();
+                    line_backspace(&mut self.cmdline, &mut self.cmdline_cursor);
                 }
-                Action::None
             }
-            Key::Enter => {
-                self.search = self.cmdline.clone();
-                self.cmdline.clear();
-                self.mode = Mode::Normal;
-                self.find_next(true);
-                Action::None
-            }
-            Key::Char(c) => {
-                self.cmdline.push(c);
-                Action::None
-            }
-            _ => Action::None,
+            Key::Delete => line_delete(&mut self.cmdline, &mut self.cmdline_cursor),
+            Key::Left => line_left(&mut self.cmdline_cursor),
+            Key::Right => line_right(&self.cmdline, &mut self.cmdline_cursor),
+            Key::Home | Key::Up => line_home(&mut self.cmdline_cursor),
+            Key::End | Key::Down => line_end(&self.cmdline, &mut self.cmdline_cursor),
+            Key::Char(c) => line_insert(&mut self.cmdline, &mut self.cmdline_cursor, c),
+            _ => {}
         }
     }
 

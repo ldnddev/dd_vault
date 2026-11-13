@@ -115,6 +115,9 @@ pub fn editor_key(key: &str, key_char: Option<&str>, control: bool) -> Option<Ed
         "enter" | "return" => Some(EditorKey::Enter),
         "escape" => Some(EditorKey::Esc),
         "backspace" => Some(EditorKey::Backspace),
+        "delete" | "del" => Some(EditorKey::Delete),
+        "home" => Some(EditorKey::Home),
+        "end" => Some(EditorKey::End),
         _ => None,
     };
     if named.is_some() {

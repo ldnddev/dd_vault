@@ -34,6 +34,7 @@ pub struct PendingAi {
 pub struct AiState {
     pub size: AiSize,
     pub draft: String,
+    pub draft_cursor: usize,
     pub transcript: Vec<String>,
     pub stream: String,
     pub scroll: u16,
@@ -50,6 +51,7 @@ impl Default for AiState {
         Self {
             size: AiSize::Collapsed,
             draft: String::new(),
+            draft_cursor: 0,
             transcript: Vec::new(),
             stream: String::new(),
             scroll: 0,
@@ -154,9 +156,12 @@ impl App {
     }
 
     pub fn prompt_ai_provider(&mut self) {
+        let draft = self.ai.settings.provider.clone();
+        let cursor = draft.chars().count();
         self.modal = Some(Modal::Prompt {
             kind: PromptKind::AiProvider,
-            draft: self.ai.settings.provider.clone(),
+            draft,
+            cursor,
         });
     }
 
@@ -200,6 +205,7 @@ impl App {
         self.modal = Some(Modal::Prompt {
             kind: PromptKind::AiKey { then_enable },
             draft: String::new(),
+            cursor: 0,
         });
     }
 
@@ -243,9 +249,12 @@ impl App {
     }
 
     pub fn prompt_ai_model(&mut self) {
+        let draft = self.ai.settings.resolved_model();
+        let cursor = draft.chars().count();
         self.modal = Some(Modal::Prompt {
             kind: PromptKind::AiModel,
-            draft: self.ai.settings.resolved_model(),
+            draft,
+            cursor,
         });
     }
 
@@ -516,11 +525,21 @@ impl App {
             KeyCode::Tab => self.cycle_ai_card(),
             KeyCode::Enter => {
                 let draft = std::mem::take(&mut self.ai.draft);
+                self.ai.draft_cursor = 0;
                 self.request_ai(draft, None);
             }
             KeyCode::Backspace => {
-                self.ai.draft.pop();
+                dd_edit::line_backspace(&mut self.ai.draft, &mut self.ai.draft_cursor);
             }
+            KeyCode::Delete => {
+                dd_edit::line_delete(&mut self.ai.draft, &mut self.ai.draft_cursor);
+            }
+            KeyCode::Left => dd_edit::line_left(&mut self.ai.draft_cursor),
+            KeyCode::Right => {
+                dd_edit::line_right(&self.ai.draft, &mut self.ai.draft_cursor);
+            }
+            KeyCode::Home => dd_edit::line_home(&mut self.ai.draft_cursor),
+            KeyCode::End => dd_edit::line_end(&self.ai.draft, &mut self.ai.draft_cursor),
             KeyCode::Up => self.ai.scroll = self.ai.scroll.saturating_sub(1),
             KeyCode::Down => self.ai.scroll = self.ai.scroll.saturating_add(1),
             KeyCode::Char(c)
@@ -529,7 +548,7 @@ impl App {
                     .contains(crossterm::event::KeyModifiers::CONTROL)
                     && !c.is_control() =>
             {
-                self.ai.draft.push(c);
+                dd_edit::line_insert(&mut self.ai.draft, &mut self.ai.draft_cursor, c);
             }
             _ => {}
         }

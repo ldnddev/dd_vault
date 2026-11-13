@@ -47,6 +47,7 @@ impl App {
         self.modal = Some(Modal::Prompt {
             kind: PromptKind::New { parent },
             draft: String::new(),
+            cursor: 0,
         });
     }
 
@@ -57,15 +58,18 @@ impl App {
         if row.name == ".." {
             return;
         }
+        let draft = row
+            .rel
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let cursor = draft.chars().count();
         self.modal = Some(Modal::Prompt {
             kind: PromptKind::Rename {
                 rel: row.rel.clone(),
             },
-            draft: row
-                .rel
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            draft,
+            cursor,
         });
     }
 
@@ -89,7 +93,7 @@ impl App {
     }
 
     pub fn submit_prompt(&mut self) {
-        let Some(Modal::Prompt { kind, draft }) = self.modal.clone() else {
+        let Some(Modal::Prompt { kind, draft, .. }) = self.modal.clone() else {
             return;
         };
         match kind {

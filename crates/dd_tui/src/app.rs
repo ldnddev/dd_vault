@@ -66,6 +66,13 @@ pub enum Leader {
     SpaceA,
 }
 
+/// A drawn text field. `prefix` is the number of columns before the editable text.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TextLine {
+    pub area: Rect,
+    pub prefix: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Modal {
     VaultPicker {
@@ -74,6 +81,7 @@ pub enum Modal {
     Prompt {
         kind: PromptKind,
         draft: String,
+        cursor: usize,
     },
     Confirm {
         kind: ConfirmKind,
@@ -82,6 +90,7 @@ pub enum Modal {
     Finder {
         kind: FinderKind,
         query: String,
+        cursor: usize,
         selected: usize,
         hits: Vec<FileHit>,
     },
@@ -91,6 +100,7 @@ pub enum Modal {
     },
     Palette {
         query: String,
+        cursor: usize,
         selected: usize,
         items: Vec<PaletteItem>,
     },
@@ -235,6 +245,11 @@ pub struct App {
     pub mouse_drag: Option<MouseDrag>,
     pub editor: Editor,
     pub editor_inner: Rect,
+    /// Last drawn single-line fields. A zero-width area is inactive.
+    pub modal_line: TextLine,
+    pub cmd_line: TextLine,
+    pub ai_line: TextLine,
+    pub hex_line: TextLine,
     /// Soft-wrap the notes pane. Loaded from the vault `wrap` setting. Preview always wraps.
     pub wrap_notes: bool,
     pub preview_visible: bool,
@@ -373,6 +388,10 @@ impl App {
             mouse_drag: None,
             editor: Editor::empty(),
             editor_inner: Rect::default(),
+            modal_line: TextLine::default(),
+            cmd_line: TextLine::default(),
+            ai_line: TextLine::default(),
+            hex_line: TextLine::default(),
             wrap_notes: true,
             preview_visible: true,
             preview_scroll: 0,
@@ -843,6 +862,7 @@ impl App {
         self.modal = Some(Modal::Finder {
             kind,
             query: String::new(),
+            cursor: 0,
             selected: 0,
             hits,
         });

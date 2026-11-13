@@ -20,6 +20,8 @@ pub struct TreeState {
     pub selected: usize,
     pub scroll: usize,
     pub filter: String,
+    /// Character index into [`Self::filter`].
+    pub filter_cursor: usize,
     pub filtering: bool,
     /// Selection to restore when a vault-wide filter is cancelled.
     filter_anchor: Option<PathBuf>,
@@ -33,6 +35,7 @@ impl TreeState {
             selected: 0,
             scroll: 0,
             filter: String::new(),
+            filter_cursor: 0,
             filtering: false,
             filter_anchor: None,
         }
@@ -216,6 +219,7 @@ impl TreeState {
     pub fn cancel_filter(&mut self) {
         let anchor = self.filter_anchor.take();
         self.filter.clear();
+        self.filter_cursor = 0;
         self.filtering = false;
         self.scroll = 0;
         if let Some(rel) = anchor {
@@ -227,6 +231,7 @@ impl TreeState {
 
     pub fn dismiss_filter(&mut self) {
         self.filter.clear();
+        self.filter_cursor = 0;
         self.filtering = false;
         self.filter_anchor = None;
     }

@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use dd_edit::{Action, Editor, GitOp, Mode};
+use dd_edit::{
+    Action, Editor, GitOp, Mode, line_backspace, line_click, line_delete, line_end, line_home,
+    line_insert, line_left, line_parts, line_right,
+};
 use dd_render::encode_png_rgba;
 use dd_vault_core::{
     FileHit, GitOpResult, GitStatus, Index, Jump, JumpList, NodeKind, Paths, Registry,
@@ -41,7 +44,7 @@ use crate::commands::{
     jump_to_heading, leader_step, looks_like_image, palette_action, parse_new_name,
 };
 use crate::editor_view::{
-    Caret, EditorRow, OpenChoice, SessionWrite, choose_open, pane_name, prompt_line,
+    Caret, EditorRow, OpenChoice, PromptLine, SessionWrite, choose_open, pane_name, prompt_line,
     remember_session, visible_editor_rows, wheel_rows,
 };
 use crate::fonts::{GuiFonts, installed_families};
@@ -177,15 +180,18 @@ enum Overlay {
     Prompt {
         kind: PromptKind,
         draft: String,
+        cursor: usize,
     },
     Finder {
         kind: FinderKind,
         query: String,
+        cursor: usize,
         selected: usize,
         hits: Vec<FileHit>,
     },
     Palette {
         query: String,
+        cursor: usize,
         selected: usize,
         items: Vec<PaletteItem>,
     },
@@ -295,6 +301,9 @@ pub struct Shell {
     family_selected: usize,
     family_scroll: usize,
     font_filter: Option<String>,
+    font_cursor: usize,
+    line_hits: LineHits,
+    hex_hit: Option<HexHit>,
     appear: AppearSection,
     measured_mono: String,
     body_cols: u16,
@@ -311,7 +320,7 @@ struct TreeRow {
 struct NotesView {
     title: String,
     rows: Vec<EditorRow>,
-    prompt: Option<String>,
+    prompt: Option<PromptLine>,
     caret_bar: Option<Point<Pixels>>,
     focused: bool,
     bar: Option<BarPaint>,
@@ -323,7 +332,7 @@ struct NotesView {
 struct TreeView {
     title: String,
     rows: Vec<TreeRow>,
-    filter: Option<String>,
+    filter: Option<FieldText>,
     focused: bool,
     width: f32,
     bar: Option<BarPaint>,
@@ -366,6 +375,7 @@ struct AiPaint {
     title: String,
     lines: Vec<String>,
     draft: Option<String>,
+    draft_cursor: usize,
     wide: bool,
 }
 
@@ -408,6 +418,8 @@ enum AppearAction {
 #[derive(Clone)]
 struct AppearLine {
     text: String,
+    caret: Option<FieldCaret>,
+    hex: Option<HexSpan>,
     selected: bool,
     action: AppearAction,
 }
@@ -416,6 +428,7 @@ struct AppearLine {
 struct AppearanceView {
     title: String,
     hint: String,
+    font_query: Option<FieldText>,
     lines: Vec<AppearLine>,
     editor_font: String,
     preview_font: String,
@@ -433,8 +446,61 @@ struct OverlayLine {
 struct OverlayView {
     title: String,
     query: String,
+    query_cursor: Option<usize>,
+    query_mask: bool,
     lines: Vec<OverlayLine>,
     warn: bool,
+}
+
+#[derive(Clone)]
+struct FieldText {
+    text: String,
+    cursor: usize,
+}
+
+#[derive(Clone)]
+struct FieldCaret {
+    prefix: String,
+    text: String,
+    cursor: usize,
+    suffix: String,
+}
+
+#[derive(Clone, Copy)]
+struct HexSpan {
+    prefix: usize,
+    len: usize,
+}
+
+#[derive(Clone, Copy)]
+struct LineBox {
+    bounds: Bounds<Pixels>,
+    prefix: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+struct LineHits {
+    prompt: Option<LineBox>,
+    filter: Option<LineBox>,
+    ai: Option<LineBox>,
+    cmd: Option<LineBox>,
+    font: Option<LineBox>,
+}
+
+#[derive(Clone, Copy)]
+enum LineSlot {
+    Prompt,
+    Filter,
+    Ai,
+    Cmd,
+    Font,
+}
+
+#[derive(Clone, Copy)]
+struct HexHit {
+    bounds: Bounds<Pixels>,
+    prefix: usize,
+    len: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -516,6 +582,9 @@ impl Shell {
             family_selected: 0,
             family_scroll: 0,
             font_filter: None,
+            font_cursor: 0,
+            line_hits: LineHits::default(),
+            hex_hit: None,
             appear: AppearSection::Theme,
             measured_mono: String::new(),
             body_cols: 120,
@@ -550,6 +619,8 @@ impl Shell {
 
     fn frame(&mut self, window: &mut Window) -> Frame {
         self.ensure_char_width(window);
+        self.line_hits = LineHits::default();
+        self.hex_hit = None;
         self.sync_status_toast();
         self.update_body_cols(window);
         let header_right = self
@@ -773,7 +844,10 @@ impl Shell {
             })
             .collect();
         let filter = if filtering {
-            Some(format!("/{}", open.tree.filter))
+            Some(FieldText {
+                text: open.tree.filter.clone(),
+                cursor: open.tree.filter_cursor,
+            })
         } else {
             None
         };
@@ -1554,11 +1628,19 @@ impl Shell {
             FilterKey::Cancel => open.tree.cancel_filter(),
             FilterKey::Stop => open.tree.filtering = false,
             FilterKey::Backspace => {
-                open.tree.filter.pop();
+                line_backspace(&mut open.tree.filter, &mut open.tree.filter_cursor);
                 open.tree.selected = 0;
             }
+            FilterKey::Delete => {
+                line_delete(&mut open.tree.filter, &mut open.tree.filter_cursor);
+                open.tree.selected = 0;
+            }
+            FilterKey::Left => line_left(&mut open.tree.filter_cursor),
+            FilterKey::Right => line_right(&open.tree.filter, &mut open.tree.filter_cursor),
+            FilterKey::Home => line_home(&mut open.tree.filter_cursor),
+            FilterKey::End => line_end(&open.tree.filter, &mut open.tree.filter_cursor),
             FilterKey::Type(ch) => {
-                open.tree.filter.push(ch);
+                line_insert(&mut open.tree.filter, &mut open.tree.filter_cursor, ch);
                 open.tree.selected = 0;
             }
             FilterKey::Ignore => {}
@@ -1845,7 +1927,14 @@ impl Shell {
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if event.button != MouseButton::Left || self.modal_up() {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        if self.place_line_clicks(event.position) {
+            cx.notify();
+            return;
+        }
+        if self.modal_up() {
             return;
         }
         if let Some(kind) = self.split_at(event.position) {
@@ -1868,6 +1957,93 @@ impl Shell {
             }
         }
         cx.notify();
+    }
+
+    fn place_line_clicks(&mut self, pos: Point<Pixels>) -> bool {
+        let width = (self.char_w / px(1.)).max(1.0);
+        if let Some(hit) = self.line_hits.prompt
+            && point_in(hit.bounds, pos)
+        {
+            self.place_overlay_cursor(caret_column(hit.bounds, pos, width, hit.prefix));
+            return true;
+        }
+        if let Some(hit) = self.line_hits.font
+            && point_in(hit.bounds, pos)
+        {
+            let col = caret_column(hit.bounds, pos, width, hit.prefix);
+            let at = line_click(self.font_filter.as_deref().unwrap_or(""), col);
+            self.font_cursor = at;
+            return true;
+        }
+        if let Some(hit) = self.line_hits.filter
+            && point_in(hit.bounds, pos)
+        {
+            let col = caret_column(hit.bounds, pos, width, hit.prefix);
+            if let Some(open) = &mut self.open
+                && open.tree.filtering
+            {
+                open.tree.filter_cursor = line_click(&open.tree.filter, col);
+            }
+            return true;
+        }
+        if let Some(hit) = self.line_hits.cmd
+            && point_in(hit.bounds, pos)
+        {
+            let col = caret_column(hit.bounds, pos, width, hit.prefix);
+            if let Some(open) = &mut self.open
+                && matches!(open.editor.mode, Mode::Command | Mode::Search)
+            {
+                open.editor.cmdline_cursor = line_click(&open.editor.cmdline, col);
+            }
+            return true;
+        }
+        if let Some(hit) = self.line_hits.ai
+            && point_in(hit.bounds, pos)
+            && self.ai.expanded()
+        {
+            let col = caret_column(hit.bounds, pos, width, hit.prefix);
+            let at = line_click(&self.ai.draft, col);
+            self.ai.draft_cursor = at;
+            return true;
+        }
+        false
+    }
+
+    fn place_overlay_cursor(&mut self, col: usize) {
+        match &mut self.overlay {
+            Some(Overlay::Prompt { draft, cursor, .. }) => *cursor = line_click(draft, col),
+            Some(Overlay::Finder { query, cursor, .. }) => *cursor = line_click(query, col),
+            Some(Overlay::Palette { query, cursor, .. }) => *cursor = line_click(query, col),
+            _ => {}
+        }
+    }
+
+    fn click_color_row(&mut self, index: usize, pos: Point<Pixels>) {
+        let selected = self.theme_editor.as_ref().map(|editor| editor.selected);
+        if selected != Some(index) {
+            if let Some(editor) = self.theme_editor.as_mut() {
+                editor.editing_hex = false;
+                editor.select(index);
+            }
+            return;
+        }
+        let place = self.hex_hit.and_then(|hit| {
+            if !point_in(hit.bounds, pos) {
+                return None;
+            }
+            let width = (self.char_w / px(1.)).max(1.0);
+            let col = caret_column(hit.bounds, pos, width, 0);
+            if col < hit.prefix {
+                return None;
+            }
+            let rel = col - hit.prefix;
+            if rel <= hit.len { Some(rel) } else { None }
+        });
+        if let Some(col) = place
+            && let Some(editor) = self.theme_editor.as_mut()
+        {
+            editor.place_hex_cursor(col);
+        }
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2685,6 +2861,7 @@ impl Shell {
         self.overlay = Some(Overlay::Prompt {
             kind: PromptKind::New { parent },
             draft: String::new(),
+            cursor: 0,
         });
         Effect::None
     }
@@ -2706,9 +2883,11 @@ impl Shell {
             )
         };
         self.leader = Leader::None;
+        let cursor = draft.1.chars().count();
         self.overlay = Some(Overlay::Prompt {
             kind: PromptKind::Rename { rel: draft.0 },
             draft: draft.1,
+            cursor,
         });
         Effect::None
     }
@@ -2810,16 +2989,8 @@ impl Shell {
             self.submit_prompt();
             return;
         }
-        if press.key == "backspace" {
-            if let Some(Overlay::Prompt { draft, .. }) = &mut self.overlay {
-                draft.pop();
-            }
-            return;
-        }
-        if let Some(ch) = typed_char(press)
-            && let Some(Overlay::Prompt { draft, .. }) = &mut self.overlay
-        {
-            draft.push(ch);
+        if let Some(Overlay::Prompt { draft, cursor, .. }) = &mut self.overlay {
+            edit_line(draft, cursor, press, true);
         }
     }
 
@@ -2933,17 +3104,14 @@ impl Shell {
             }
             return;
         }
-        if press.key == "backspace" {
-            if let Some(Overlay::Finder { query, .. }) = &mut self.overlay {
-                query.pop();
-            }
-            self.refresh_finder();
-            return;
-        }
-        if let Some(ch) = typed_char(press) {
-            if let Some(Overlay::Finder { query, .. }) = &mut self.overlay {
-                query.push(ch);
-            }
+        let changes =
+            matches!(press.key, "backspace" | "delete" | "del") || typed_char(press).is_some();
+        let edited = if let Some(Overlay::Finder { query, cursor, .. }) = &mut self.overlay {
+            edit_line(query, cursor, press, false)
+        } else {
+            false
+        };
+        if edited && changes {
             self.refresh_finder();
         }
     }
@@ -2965,17 +3133,14 @@ impl Shell {
             }
             return Effect::None;
         }
-        if press.key == "backspace" {
-            if let Some(Overlay::Palette { query, .. }) = &mut self.overlay {
-                query.pop();
-            }
-            self.refresh_palette();
-            return Effect::None;
-        }
-        if let Some(ch) = typed_char(press) {
-            if let Some(Overlay::Palette { query, .. }) = &mut self.overlay {
-                query.push(ch);
-            }
+        let changes =
+            matches!(press.key, "backspace" | "delete" | "del") || typed_char(press).is_some();
+        let edited = if let Some(Overlay::Palette { query, cursor, .. }) = &mut self.overlay {
+            edit_line(query, cursor, press, false)
+        } else {
+            false
+        };
+        if edited && changes {
             self.refresh_palette();
         }
         Effect::None
@@ -2985,6 +3150,7 @@ impl Shell {
         self.leader = Leader::None;
         self.overlay = Some(Overlay::Palette {
             query: String::new(),
+            cursor: 0,
             selected: 0,
             items: filter_palette(""),
         });
@@ -3071,6 +3237,7 @@ impl Shell {
         self.overlay = Some(Overlay::Finder {
             kind,
             query: String::new(),
+            cursor: 0,
             selected: 0,
             hits,
         });
@@ -3655,7 +3822,11 @@ impl Shell {
     fn overlay_view(&self) -> Option<OverlayView> {
         match &self.overlay {
             None => None,
-            Some(Overlay::Prompt { kind, draft }) => {
+            Some(Overlay::Prompt {
+                kind,
+                draft,
+                cursor,
+            }) => {
                 let title = match kind {
                     PromptKind::New { parent } if parent.as_os_str().is_empty() => {
                         "New file or folder".to_string()
@@ -3674,13 +3845,12 @@ impl Shell {
                     }
                     PromptKind::AiModel => "AI model".to_string(),
                 };
-                let query = match kind {
-                    PromptKind::AiKey { .. } => masked_key(draft),
-                    _ => draft.clone(),
-                };
+                let query_mask = matches!(kind, PromptKind::AiKey { .. });
                 Some(OverlayView {
                     title,
-                    query,
+                    query: draft.clone(),
+                    query_cursor: Some(*cursor),
+                    query_mask,
                     lines: Vec::new(),
                     warn: false,
                 })
@@ -3688,6 +3858,7 @@ impl Shell {
             Some(Overlay::Finder {
                 kind,
                 query,
+                cursor,
                 selected,
                 hits,
             }) => {
@@ -3705,12 +3876,15 @@ impl Shell {
                 Some(OverlayView {
                     title: title.to_string(),
                     query: query.clone(),
+                    query_cursor: Some(*cursor),
+                    query_mask: false,
                     lines: windowed(&labels, *selected),
                     warn: false,
                 })
             }
             Some(Overlay::Palette {
                 query,
+                cursor,
                 selected,
                 items,
             }) => {
@@ -3725,6 +3899,8 @@ impl Shell {
                 Some(OverlayView {
                     title: "Commands".to_string(),
                     query: query.clone(),
+                    query_cursor: Some(*cursor),
+                    query_mask: false,
                     lines: windowed(&labels, *selected),
                     warn: false,
                 })
@@ -3741,6 +3917,8 @@ impl Shell {
                 Some(OverlayView {
                     title: "Vaults".to_string(),
                     query: String::new(),
+                    query_cursor: None,
+                    query_mask: false,
                     lines: windowed(&labels, self.picker_selected),
                     warn: false,
                 })
@@ -3748,6 +3926,8 @@ impl Shell {
             Some(Overlay::Notice { title, message }) => Some(OverlayView {
                 title: title.clone(),
                 query: String::new(),
+                query_cursor: None,
+                query_mask: false,
                 lines: message
                     .split('\n')
                     .map(|line| OverlayLine {
@@ -3780,10 +3960,19 @@ impl Shell {
             AiSize::Chat => 8,
             AiSize::Full => 16,
         };
+        let (draft, draft_cursor) = match self.ai.draft_field() {
+            Some((text, cursor)) => (Some(text), cursor),
+            None => (None, 0),
+        };
+        let mut lines = self.ai.body_lines(limit);
+        if self.ai.streaming() && self.ai.expanded() {
+            lines.push("Esc cancel".to_string());
+        }
         AiPaint {
             title: self.ai.title(),
-            lines: self.ai.body_lines(limit),
-            draft: self.ai.draft_line(),
+            lines,
+            draft,
+            draft_cursor,
             wide: self.ai.size != AiSize::Collapsed,
         }
     }
@@ -3900,6 +4089,7 @@ impl Shell {
         self.overlay = Some(Overlay::Prompt {
             kind: PromptKind::GitCommit { then_push },
             draft: String::new(),
+            cursor: 0,
         });
     }
 
@@ -4110,9 +4300,12 @@ impl Shell {
     }
 
     fn prompt_ai_provider(&mut self) {
+        let draft = self.ai.settings.provider.clone();
+        let cursor = draft.chars().count();
         self.overlay = Some(Overlay::Prompt {
             kind: PromptKind::AiProvider,
-            draft: self.ai.settings.provider.clone(),
+            draft,
+            cursor,
         });
     }
 
@@ -4136,6 +4329,7 @@ impl Shell {
         self.overlay = Some(Overlay::Prompt {
             kind: PromptKind::AiKey { then_enable },
             draft: String::new(),
+            cursor: 0,
         });
     }
 
@@ -4153,9 +4347,12 @@ impl Shell {
     }
 
     fn prompt_ai_model(&mut self) {
+        let draft = self.ai.settings.resolved_model();
+        let cursor = draft.chars().count();
         self.overlay = Some(Overlay::Prompt {
             kind: PromptKind::AiModel,
-            draft: self.ai.settings.resolved_model(),
+            draft,
+            cursor,
         });
     }
 
@@ -4356,6 +4553,7 @@ impl Shell {
         self.ensure_faces_listed();
         self.appear = AppearSection::Theme;
         self.font_filter = None;
+        self.font_cursor = 0;
         self.family_selected = 0;
         self.family_scroll = 0;
         let picker = ThemePicker::new(
@@ -4498,6 +4696,7 @@ impl Shell {
         self.theme_editor = None;
         self.appear = AppearSection::Theme;
         self.font_filter = None;
+        self.font_cursor = 0;
     }
 
     fn apply_live_palette(&mut self, palette: Palette) {
@@ -4532,6 +4731,7 @@ impl Shell {
                 self.theme_picker = None;
                 self.appear = AppearSection::Theme;
                 self.font_filter = None;
+                self.font_cursor = 0;
                 push_toast(
                     &mut self.toasts,
                     ToastLevel::Success,
@@ -4584,9 +4784,18 @@ impl Shell {
         } else {
             ("Appearance".into(), String::new(), Vec::new())
         };
+        let font_query = if self.appear == AppearSection::Theme {
+            None
+        } else {
+            self.font_filter.as_ref().map(|query| FieldText {
+                text: query.clone(),
+                cursor: self.font_cursor,
+            })
+        };
         AppearanceView {
             title,
             hint,
+            font_query,
             lines,
             editor_font: self.mono.clone(),
             preview_font: self.sans.clone(),
@@ -4602,8 +4811,8 @@ impl Shell {
             AppearSection::Sans => "Appearance · preview font",
             _ => "Appearance · editor font",
         };
-        let hint = if let Some(query) = &self.font_filter {
-            format!("/{query}    arrows move    Enter keep    Esc clear")
+        let hint = if self.font_filter.is_some() {
+            "Enter keep    Esc clear".into()
         } else {
             "j/k live    Enter keep    / filter    f cycle    h back    s save".into()
         };
@@ -4613,18 +4822,16 @@ impl Shell {
             .enumerate()
             .skip(start)
             .take(rows)
-            .map(|(index, name)| AppearLine {
-                text: name.clone(),
-                selected: name == &live,
-                action: AppearAction::Family(index),
+            .map(|(index, name)| {
+                plain_line(name.clone(), name == &live, AppearAction::Family(index))
             })
             .collect();
         if lines.is_empty() {
-            lines.push(AppearLine {
-                text: "(no matching fonts)".into(),
-                selected: false,
-                action: AppearAction::None,
-            });
+            lines.push(plain_line(
+                "(no matching fonts)".to_string(),
+                false,
+                AppearAction::None,
+            ));
         }
         (title.into(), hint, lines)
     }
@@ -4753,6 +4960,7 @@ impl Shell {
             push_toast(&mut self.toasts, ToastLevel::Success, "Fonts saved");
         }
         self.font_filter = None;
+        self.font_cursor = 0;
         self.appear = AppearSection::Theme;
     }
 
@@ -4864,6 +5072,7 @@ impl Shell {
             AppearSection::Sans => AppearSection::Theme,
         };
         self.font_filter = None;
+        self.font_cursor = 0;
         if next == AppearSection::Theme {
             self.appear = AppearSection::Theme;
         } else {
@@ -4874,6 +5083,7 @@ impl Shell {
     fn focus_fonts(&mut self, section: AppearSection) {
         self.appear = section;
         self.font_filter = None;
+        self.font_cursor = 0;
         self.retarget_font_highlight();
     }
 
@@ -4891,12 +5101,14 @@ impl Shell {
         }
         if press.key == "/" || press.key_char == Some("/") {
             self.font_filter = Some(String::new());
+            self.font_cursor = 0;
             self.retarget_font_highlight();
             return Effect::None;
         }
         if matches!(press.key, "left" | "h") || press.key_char == Some("h") {
             self.appear = AppearSection::Theme;
             self.font_filter = None;
+            self.font_cursor = 0;
             return Effect::None;
         }
         if press.key == "enter" || press.key == "return" {
@@ -4922,6 +5134,7 @@ impl Shell {
         }
         if press.key == "escape" {
             self.font_filter = None;
+            self.font_cursor = 0;
             self.retarget_font_highlight();
             return Effect::None;
         }
@@ -4929,11 +5142,7 @@ impl Shell {
             self.keep_fonts();
             return Effect::None;
         }
-        if press.key == "backspace" {
-            if let Some(query) = self.font_filter.as_mut() {
-                query.pop();
-            }
-            self.retarget_font_highlight();
+        if self.move_font_caret(press) {
             return Effect::None;
         }
         if let Some(delta) = font_arrow_delta(press) {
@@ -4945,11 +5154,53 @@ impl Shell {
             && !ch.is_control()
         {
             if let Some(query) = self.font_filter.as_mut() {
-                query.push(ch);
+                line_insert(query, &mut self.font_cursor, ch);
             }
             self.retarget_font_highlight();
         }
         Effect::None
+    }
+
+    /// Left, right, home, and end stay on the filter. Up and down still move the list.
+    fn move_font_caret(&mut self, press: KeyPress<'_>) -> bool {
+        let mut changed = false;
+        let handled = if let Some(query) = self.font_filter.as_mut() {
+            match press.key {
+                "backspace" => {
+                    line_backspace(query, &mut self.font_cursor);
+                    changed = true;
+                    true
+                }
+                "delete" | "del" => {
+                    line_delete(query, &mut self.font_cursor);
+                    changed = true;
+                    true
+                }
+                "left" => {
+                    line_left(&mut self.font_cursor);
+                    true
+                }
+                "right" => {
+                    line_right(query, &mut self.font_cursor);
+                    true
+                }
+                "home" => {
+                    line_home(&mut self.font_cursor);
+                    true
+                }
+                "end" => {
+                    line_end(query, &mut self.font_cursor);
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if changed {
+            self.retarget_font_highlight();
+        }
+        handled
     }
 
     fn appear_click(&mut self, action: AppearAction) {
@@ -4964,6 +5215,7 @@ impl Shell {
             AppearAction::Family(index) => self.choose_family(index),
             AppearAction::Focus(section) => {
                 self.font_filter = None;
+                self.font_cursor = 0;
                 if section == AppearSection::Theme {
                     self.appear = AppearSection::Theme;
                 } else {
@@ -5042,7 +5294,7 @@ impl Shell {
 impl Overlay {
     fn clone_kind(&self) -> Option<(PromptKind, String)> {
         match self {
-            Overlay::Prompt { kind, draft } => Some((kind.clone(), draft.clone())),
+            Overlay::Prompt { kind, draft, .. } => Some((kind.clone(), draft.clone())),
             _ => None,
         }
     }
@@ -5092,8 +5344,10 @@ impl Render for Shell {
                         title: String::new(),
                         lines: Vec::new(),
                         draft: None,
+                        draft_cursor: 0,
                         wide: false,
                     }),
+                    entity.clone(),
                 ))
             })
             .when(frame.overlay.is_some(), |this| {
@@ -5102,9 +5356,12 @@ impl Render for Shell {
                     frame.overlay.clone().unwrap_or_else(|| OverlayView {
                         title: String::new(),
                         query: String::new(),
+                        query_cursor: None,
+                        query_mask: false,
                         lines: Vec::new(),
                         warn: false,
                     }),
+                    entity.clone(),
                 ))
             })
             .when(frame.confirm.is_some(), |this| {
@@ -5125,6 +5382,7 @@ impl Render for Shell {
                     frame.theme_panel.as_ref().unwrap_or(&AppearanceView {
                         title: String::new(),
                         hint: String::new(),
+                        font_query: None,
                         lines: Vec::new(),
                         editor_font: String::new(),
                         preview_font: String::new(),
@@ -5309,7 +5567,7 @@ fn editor_column(
         );
     }
     if let Some(preview) = preview {
-        let pane = preview_pane(theme, preview, entity);
+        let pane = preview_pane(theme, preview, entity.clone());
         column = if let Some(height) = preview.fixed_h {
             column.child(pane.h(px(height)).flex_shrink(0.).min_h(px(0.)))
         } else {
@@ -5325,7 +5583,7 @@ fn editor_column(
     if let Some(ai) = ai {
         let grow = if notes.is_some() { 2.0 } else { 1.0 };
         column = column.child(
-            ai_pane(theme, ai)
+            ai_pane(theme, ai, entity.clone())
                 .flex_grow(grow)
                 .flex_shrink(1.)
                 .flex_basis(px(0.))
@@ -5335,8 +5593,8 @@ fn editor_column(
     column
 }
 
-fn ai_pane(theme: &GuiTheme, card: &AiPaint) -> gpui::Div {
-    ai_card_body(theme, card)
+fn ai_pane(theme: &GuiTheme, card: &AiPaint, entity: Entity<Shell>) -> gpui::Div {
+    ai_card_body(theme, card, entity)
         .flex_1()
         .min_w(px(0.))
         .border_t_1()
@@ -5344,10 +5602,10 @@ fn ai_pane(theme: &GuiTheme, card: &AiPaint) -> gpui::Div {
         .bg(rgb(theme.body_background))
 }
 
-fn ai_float_card(theme: &GuiTheme, card: AiPaint) -> gpui::Div {
+fn ai_float_card(theme: &GuiTheme, card: AiPaint, entity: Entity<Shell>) -> gpui::Div {
     let cols = if card.wide { 40.0 } else { 22.0 };
     let rows = if card.wide { 12.0 } else { 3.0 };
-    ai_card_body(theme, &card)
+    ai_card_body(theme, &card, entity)
         .absolute()
         .bottom(px(CHROME + 8.))
         .right(px(12.))
@@ -5358,7 +5616,7 @@ fn ai_float_card(theme: &GuiTheme, card: AiPaint) -> gpui::Div {
         .bg(rgb(theme.modal_background))
 }
 
-fn ai_card_body(theme: &GuiTheme, card: &AiPaint) -> gpui::Div {
+fn ai_card_body(theme: &GuiTheme, card: &AiPaint, entity: Entity<Shell>) -> gpui::Div {
     let mut panel = div()
         .flex()
         .flex_col()
@@ -5388,14 +5646,21 @@ fn ai_card_body(theme: &GuiTheme, card: &AiPaint) -> gpui::Div {
         );
     }
     if let Some(draft) = &card.draft {
-        panel = panel.child(
-            div()
-                .h(px(LINE))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_color(rgb(theme.text_labels))
-                .child(draft.clone()),
-        );
+        panel = panel.child(caret_row(
+            theme,
+            CaretPaint {
+                prefix: "",
+                text: draft,
+                cursor: card.draft_cursor,
+                mask: false,
+                suffix: "",
+                color: theme.text_labels,
+                background: None,
+                slot: LineSlot::Ai,
+                prefix_cols: 0,
+            },
+            entity,
+        ));
     }
     panel
 }
@@ -5418,17 +5683,26 @@ fn tree_pane(theme: &GuiTheme, tree: &TreeView, entity: Entity<Shell>) -> gpui::
         .bg(rgb(theme.body_background))
         .child(pane_title(&tree.title, title_color, theme))
         .child(tree_rows(theme, tree, entity.clone()))
-        .child(pane_bounds(entity, |shell, bounds| {
+        .child(pane_bounds(entity.clone(), |shell, bounds| {
             shell.hit.tree_pane = Some(bounds)
         }))
         .when(tree.filter.is_some(), |pane| {
-            pane.child(
-                div()
-                    .h(px(LINE))
-                    .px(px(6.))
-                    .text_color(rgb(theme.text_labels))
-                    .child(tree.filter.clone().unwrap_or_default()),
-            )
+            let filter = tree.filter.clone().unwrap();
+            pane.child(caret_row(
+                theme,
+                CaretPaint {
+                    prefix: "/",
+                    text: &filter.text,
+                    cursor: filter.cursor,
+                    mask: false,
+                    suffix: "",
+                    color: theme.text_labels,
+                    background: None,
+                    slot: LineSlot::Filter,
+                    prefix_cols: 1,
+                },
+                entity.clone(),
+            ))
         })
 }
 
@@ -5516,18 +5790,26 @@ fn notes_pane(theme: &GuiTheme, notes: &NotesView, entity: Entity<Shell>) -> gpu
         .overflow_hidden()
         .child(pane_title(&notes.title, title_color, theme))
         .child(notes_rows(theme, notes, entity.clone()))
-        .child(pane_bounds(entity, |shell, bounds| {
+        .child(pane_bounds(entity.clone(), |shell, bounds| {
             shell.hit.notes_pane = Some(bounds);
         }))
         .when(notes.prompt.is_some(), |pane| {
-            pane.child(
-                div()
-                    .h(px(LINE))
-                    .px(px(6.))
-                    .bg(rgb(theme.modal_background))
-                    .text_color(rgb(theme.modal_text))
-                    .child(notes.prompt.clone().unwrap_or_default()),
-            )
+            let prompt = notes.prompt.clone().unwrap();
+            pane.child(caret_row(
+                theme,
+                CaretPaint {
+                    prefix: &prompt.prefix.to_string(),
+                    text: &prompt.text,
+                    cursor: prompt.cursor,
+                    mask: false,
+                    suffix: "",
+                    color: theme.modal_text,
+                    background: Some(theme.modal_background),
+                    slot: LineSlot::Cmd,
+                    prefix_cols: 1,
+                },
+                entity.clone(),
+            ))
         })
 }
 
@@ -6082,7 +6364,165 @@ fn pack(color: (u8, u8, u8)) -> u32 {
     (u32::from(color.0) << 16) | (u32::from(color.1) << 8) | u32::from(color.2)
 }
 
-fn overlay_panel(theme: &GuiTheme, view: OverlayView) -> gpui::Div {
+/// Insert, delete, and move a one-line caret. Up and down jump to the ends
+/// only when this field has no list under it.
+fn edit_line(text: &mut String, cursor: &mut usize, press: KeyPress<'_>, vertical: bool) -> bool {
+    if press.control {
+        return false;
+    }
+    match press.key {
+        "backspace" => {
+            line_backspace(text, cursor);
+            true
+        }
+        "delete" | "del" => {
+            line_delete(text, cursor);
+            true
+        }
+        "left" => {
+            line_left(cursor);
+            true
+        }
+        "right" => {
+            line_right(text, cursor);
+            true
+        }
+        "home" => {
+            line_home(cursor);
+            true
+        }
+        "end" => {
+            line_end(text, cursor);
+            true
+        }
+        "up" if vertical => {
+            line_home(cursor);
+            true
+        }
+        "down" if vertical => {
+            line_end(text, cursor);
+            true
+        }
+        _ => {
+            if let Some(ch) = typed_char(press) {
+                line_insert(text, cursor, ch);
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn caret_column(bounds: Bounds<Pixels>, pos: Point<Pixels>, char_w: f32, prefix: usize) -> usize {
+    let x = (pos.x - bounds.origin.x) / px(1.);
+    let col = (x / char_w.max(1.0)).floor().max(0.0) as usize;
+    col.saturating_sub(prefix)
+}
+
+fn point_in(bounds: Bounds<Pixels>, pos: Point<Pixels>) -> bool {
+    bounds.contains(&pos)
+}
+
+fn plain_line(text: String, selected: bool, action: AppearAction) -> AppearLine {
+    AppearLine {
+        text,
+        caret: None,
+        hex: None,
+        selected,
+        action,
+    }
+}
+
+fn field_piece(text: String, background: Option<u32>, color: Option<u32>) -> gpui::Div {
+    let mut piece = div().flex_shrink_0().whitespace_nowrap();
+    if let Some(background) = background {
+        piece = piece.bg(rgb(background));
+    }
+    if let Some(color) = color {
+        piece = piece.text_color(rgb(color));
+    }
+    piece.child(text)
+}
+
+/// One text row with a caret. The hit box is the row itself, so a click's
+/// column lines up with the characters. `prefix_cols` is the painted prefix.
+struct CaretPaint<'a> {
+    prefix: &'a str,
+    text: &'a str,
+    cursor: usize,
+    mask: bool,
+    suffix: &'a str,
+    color: u32,
+    background: Option<u32>,
+    slot: LineSlot,
+    prefix_cols: usize,
+}
+
+fn caret_row(theme: &GuiTheme, field: CaretPaint<'_>, entity: Entity<Shell>) -> gpui::Div {
+    let masked = if field.mask {
+        Some(masked_key(field.text))
+    } else {
+        None
+    };
+    let source = masked.as_deref().unwrap_or(field.text);
+    let (before, cell, after) = line_parts(source, field.cursor, false);
+    let mut text_row = div()
+        .h(px(LINE))
+        .flex()
+        .flex_row()
+        .items_center()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_color(rgb(field.color));
+    if !field.prefix.is_empty() {
+        text_row = text_row.child(field_piece(field.prefix.to_string(), None, None));
+    }
+    if !before.is_empty() {
+        text_row = text_row.child(field_piece(before, None, None));
+    }
+    text_row = text_row.child(field_piece(
+        cell,
+        Some(theme.cursor),
+        Some(theme.body_background),
+    ));
+    if !after.is_empty() {
+        text_row = text_row.child(field_piece(after, None, None));
+    }
+    if !field.suffix.is_empty() {
+        text_row = text_row.child(field_piece(field.suffix.to_string(), None, None));
+    }
+    let mut row = div().relative().h(px(LINE)).overflow_hidden().cursor_text();
+    if let Some(background) = field.background {
+        row = row.bg(rgb(background));
+    }
+    row.child(text_row)
+        .child(line_hit(entity, field.slot, field.prefix_cols))
+}
+
+fn line_hit(entity: Entity<Shell>, slot: LineSlot, prefix: usize) -> gpui::Div {
+    div().absolute().size_full().child(
+        canvas(
+            move |bounds, _, cx| {
+                entity.update(cx, |shell, _| {
+                    let hit = LineBox { bounds, prefix };
+                    match slot {
+                        LineSlot::Prompt => shell.line_hits.prompt = Some(hit),
+                        LineSlot::Filter => shell.line_hits.filter = Some(hit),
+                        LineSlot::Ai => shell.line_hits.ai = Some(hit),
+                        LineSlot::Cmd => shell.line_hits.cmd = Some(hit),
+                        LineSlot::Font => shell.line_hits.font = Some(hit),
+                    }
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full(),
+    )
+}
+
+fn overlay_panel(theme: &GuiTheme, view: OverlayView, entity: Entity<Shell>) -> gpui::Div {
     let mut panel = div()
         .w_full()
         .max_h(px(LINE * 10.))
@@ -6104,15 +6544,22 @@ fn overlay_panel(theme: &GuiTheme, view: OverlayView) -> gpui::Div {
                 }))
                 .child(view.title),
         );
-    if !view.query.is_empty() {
-        panel = panel.child(
-            div()
-                .h(px(LINE))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_color(rgb(theme.text_labels))
-                .child(view.query),
-        );
+    if let Some(cursor) = view.query_cursor {
+        panel = panel.child(caret_row(
+            theme,
+            CaretPaint {
+                prefix: "",
+                text: &view.query,
+                cursor,
+                mask: view.query_mask,
+                suffix: "",
+                color: theme.text_labels,
+                background: None,
+                slot: LineSlot::Prompt,
+                prefix_cols: 0,
+            },
+            entity,
+        ));
     }
     for line in view.lines {
         panel = panel.child(
@@ -6512,10 +6959,12 @@ fn theme_lines(picker: &ThemePicker, rows: usize) -> Vec<AppearLine> {
         .enumerate()
         .skip(start)
         .take(rows)
-        .map(|(index, row)| AppearLine {
-            text: picker_label(row),
-            selected: index == picker.selected,
-            action: AppearAction::Theme(index),
+        .map(|(index, row)| {
+            plain_line(
+                picker_label(row),
+                index == picker.selected,
+                AppearAction::Theme(index),
+            )
         })
         .collect()
 }
@@ -6525,11 +6974,9 @@ fn color_lines(editor: &ThemeEditor, rows: usize) -> Vec<AppearLine> {
     let mut lines = Vec::new();
     for row in view.iter().skip(editor.scroll.min(view.len())).take(rows) {
         match row {
-            ThemeEditorRow::Header(group) => lines.push(AppearLine {
-                text: format!("— {group}"),
-                selected: false,
-                action: AppearAction::None,
-            }),
+            ThemeEditorRow::Header(group) => {
+                lines.push(plain_line(format!("— {group}"), false, AppearAction::None));
+            }
             ThemeEditorRow::Color(idx) => {
                 let key = editor.fields.get(*idx).map(|field| field.key).unwrap_or("");
                 let hex = editor
@@ -6543,9 +6990,37 @@ fn color_lines(editor: &ThemeEditor, rows: usize) -> Vec<AppearLine> {
                 } else {
                     hex
                 };
+                let prefix = format!("{key:<22} ");
+                let prefix_cols = prefix.chars().count();
                 let channel = ["R", "G", "B"][editor.channel.min(2)];
+                let suffix = format!("  {channel}");
+                let caret = if editor.editing_hex && selected {
+                    Some(FieldCaret {
+                        prefix: prefix.clone(),
+                        text: editor.hex_draft.clone(),
+                        cursor: editor.hex_cursor,
+                        suffix: suffix.clone(),
+                    })
+                } else {
+                    None
+                };
+                let text = if caret.is_some() {
+                    String::new()
+                } else {
+                    format!("{prefix}{shown_hex}{suffix}")
+                };
+                let hex = if selected {
+                    Some(HexSpan {
+                        prefix: prefix_cols,
+                        len: shown_hex.chars().count(),
+                    })
+                } else {
+                    None
+                };
                 lines.push(AppearLine {
-                    text: format!("{key:<22} {shown_hex}  {channel}"),
+                    text,
+                    caret,
+                    hex,
                     selected,
                     action: AppearAction::Color(*idx),
                 });
@@ -6582,15 +7057,9 @@ fn help_panel(theme: &GuiTheme, lines: &[String]) -> gpui::Div {
 fn appearance_sheet(theme: &GuiTheme, view: &AppearanceView, entity: Entity<Shell>) -> gpui::Div {
     let mut list = div().flex_1().min_h(px(0.)).overflow_hidden();
     for line in &view.lines {
-        list = list.child(appear_line(
-            theme,
-            &line.text,
-            line.selected,
-            line.action,
-            entity.clone(),
-        ));
+        list = list.child(appear_line(theme, line, entity.clone()));
     }
-    div()
+    let mut sheet = div()
         .absolute()
         .top(px(CHROME))
         .right(px(0.))
@@ -6606,22 +7075,44 @@ fn appearance_sheet(theme: &GuiTheme, view: &AppearanceView, entity: Entity<Shel
         .text_color(rgb(theme.modal_text))
         .border_l_1()
         .border_color(rgb(theme.border_default))
-        .child(sheet_heading(theme, &view.title))
+        .child(sheet_heading(theme, &view.title));
+    if let Some(query) = &view.font_query {
+        sheet = sheet.child(caret_row(
+            theme,
+            CaretPaint {
+                prefix: "/",
+                text: &query.text,
+                cursor: query.cursor,
+                mask: false,
+                suffix: "",
+                color: theme.text_labels,
+                background: None,
+                slot: LineSlot::Font,
+                prefix_cols: 1,
+            },
+            entity.clone(),
+        ));
+    }
+    sheet
         .child(sheet_heading(theme, &view.hint))
         .child(list)
         .child(sheet_heading(theme, "Fonts"))
         .child(appear_line(
             theme,
-            &format!("Editor   {}", view.editor_font),
-            view.editor_on,
-            AppearAction::Focus(AppearSection::Mono),
+            &plain_line(
+                format!("Editor   {}", view.editor_font),
+                view.editor_on,
+                AppearAction::Focus(AppearSection::Mono),
+            ),
             entity.clone(),
         ))
         .child(appear_line(
             theme,
-            &format!("Preview  {}", view.preview_font),
-            view.preview_on,
-            AppearAction::Focus(AppearSection::Sans),
+            &plain_line(
+                format!("Preview  {}", view.preview_font),
+                view.preview_on,
+                AppearAction::Focus(AppearSection::Sans),
+            ),
             entity,
         ))
 }
@@ -6639,34 +7130,82 @@ fn sheet_heading(theme: &GuiTheme, text: &str) -> gpui::Div {
         })
 }
 
-fn appear_line(
-    theme: &GuiTheme,
-    text: &str,
-    selected: bool,
-    action: AppearAction,
-    entity: Entity<Shell>,
-) -> gpui::Div {
-    let shown = if text.is_empty() {
-        " ".to_string()
-    } else {
-        text.to_string()
-    };
-    div()
+fn appear_line(theme: &GuiTheme, line: &AppearLine, entity: Entity<Shell>) -> gpui::Div {
+    let action = line.action;
+    let click = entity.clone();
+    let mut row = div()
+        .relative()
         .h(px(LINE))
         .overflow_hidden()
         .whitespace_nowrap()
-        .cursor_pointer()
-        .when(selected, |row| {
+        .when(line.caret.is_some(), |row| row.cursor_text())
+        .when(line.caret.is_none(), |row| row.cursor_pointer())
+        .when(line.selected, |row| {
             row.bg(rgb(theme.selected_background))
                 .text_color(rgb(theme.text_active_focus))
         })
-        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-            entity.update(cx, |shell, cx| {
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+            click.update(cx, |shell, cx| {
                 cx.stop_propagation();
-                shell.appear_click(action);
+                if let AppearAction::Color(index) = action {
+                    shell.click_color_row(index, event.position);
+                } else {
+                    shell.appear_click(action);
+                }
             });
-        })
-        .child(shown)
+        });
+    if let Some(caret) = &line.caret {
+        let (before, cell, after) = line_parts(&caret.text, caret.cursor, false);
+        row = row.flex().flex_row().items_center();
+        if !caret.prefix.is_empty() {
+            row = row.child(field_piece(caret.prefix.clone(), None, None));
+        }
+        if !before.is_empty() {
+            row = row.child(field_piece(before, None, None));
+        }
+        row = row.child(field_piece(
+            cell,
+            Some(theme.cursor),
+            Some(theme.body_background),
+        ));
+        if !after.is_empty() {
+            row = row.child(field_piece(after, None, None));
+        }
+        if !caret.suffix.is_empty() {
+            row = row.child(field_piece(caret.suffix.clone(), None, None));
+        }
+    } else {
+        let shown = if line.text.is_empty() {
+            " ".to_string()
+        } else {
+            line.text.clone()
+        };
+        row = row.child(shown);
+    }
+    if let Some(hex) = line.hex {
+        let prefix = hex.prefix;
+        let len = hex.len;
+        let paint = entity.clone();
+        row = row.child(
+            div().absolute().size_full().child(
+                canvas(
+                    move |bounds, _, cx| {
+                        paint.update(cx, |shell, _| {
+                            shell.hex_hit = Some(HexHit {
+                                bounds,
+                                prefix,
+                                len,
+                            });
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            ),
+        );
+    }
+    row
 }
 
 fn sheet_frame(theme: &GuiTheme, title: &str) -> gpui::Div {
@@ -6744,9 +7283,69 @@ fn register(paths: &Paths, vault: &Vault) -> Result<(), dd_vault_core::Error> {
 
 #[cfg(test)]
 mod chrome_tests {
-    use super::leader_footer;
+    use super::{caret_column, edit_line, leader_footer, point_in};
     use crate::chrome::{FooterKind, footer_line};
     use crate::commands::Leader;
+    use crate::keys::KeyPress;
+    use gpui::{Bounds, point, px, size};
+
+    fn press<'a>(key: &'a str, key_char: Option<&'a str>) -> KeyPress<'a> {
+        KeyPress {
+            key,
+            key_char,
+            control: false,
+            shift: false,
+        }
+    }
+
+    #[test]
+    fn line_edit_moves_the_caret() {
+        let mut text = "rename".to_string();
+        let mut cursor = text.chars().count();
+        assert!(edit_line(&mut text, &mut cursor, press("left", None), true));
+        assert_eq!(cursor, 5);
+        assert!(edit_line(
+            &mut text,
+            &mut cursor,
+            press("x", Some("X")),
+            true
+        ));
+        assert_eq!((text.as_str(), cursor), ("renamXe", 6));
+        assert!(edit_line(&mut text, &mut cursor, press("home", None), true));
+        assert_eq!(cursor, 0);
+        assert!(edit_line(
+            &mut text,
+            &mut cursor,
+            press("delete", None),
+            true
+        ));
+        assert_eq!(text, "enamXe");
+        assert!(!edit_line(&mut text, &mut cursor, press("up", None), false));
+        assert_eq!(cursor, 0);
+        assert!(edit_line(&mut text, &mut cursor, press("down", None), true));
+        assert_eq!(cursor, text.chars().count());
+        assert!(edit_line(
+            &mut text,
+            &mut cursor,
+            press("backspace", None),
+            true
+        ));
+        assert_eq!(text, "enamX");
+    }
+
+    #[test]
+    fn click_column_skips_the_prefix() {
+        let bounds = Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(80.), px(20.)),
+        };
+        assert_eq!(caret_column(bounds, point(px(0.), px(0.)), 8.0, 2), 0);
+        assert_eq!(caret_column(bounds, point(px(24.), px(1.)), 8.0, 2), 1);
+        let past = caret_column(bounds, point(px(100.), px(0.)), 8.0, 0);
+        assert_eq!(dd_edit::line_click("abcd", past), 4);
+        assert!(point_in(bounds, point(px(4.), px(4.))));
+        assert!(!point_in(bounds, point(px(90.), px(4.))));
+    }
 
     #[test]
     fn space_leader_footer_names_focus_zen_and_explore() {

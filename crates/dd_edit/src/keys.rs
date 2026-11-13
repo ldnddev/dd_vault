@@ -4,6 +4,7 @@ pub enum Key {
     Esc,
     Enter,
     Backspace,
+    Delete,
     Tab,
     Up,
     Down,

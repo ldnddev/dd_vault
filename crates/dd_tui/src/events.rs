@@ -6,7 +6,10 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use dd_edit::{Key as EditKey, Mode};
+use dd_edit::{
+    line_backspace, line_click, line_delete, line_end, line_home, line_insert, line_left,
+    line_right, Key as EditKey, Mode,
+};
 
 use crate::app::{
     App, ConfirmKind, FinderKind, Leader, Modal, MouseDrag, Pane, SplitDrag, DOUBLE_CLICK_MS,
@@ -41,10 +44,13 @@ struct ViewTick {
     help_scroll: u16,
     show_theme: bool,
     theme_sel: usize,
+    hex_cursor: usize,
+    hex_edit: bool,
     has_modal: bool,
     modal_sel: usize,
     modal_q: usize,
     modal_n: usize,
+    modal_cursor: usize,
     prompt_kind: u8,
     editor_mode: Mode,
     editor_cursor: usize,
@@ -52,6 +58,7 @@ struct ViewTick {
     editor_scroll: usize,
     editor_off: usize,
     editor_cmd: usize,
+    cmd_cursor: usize,
     editor_rel: Option<String>,
     editor_lines: usize,
     editor_chars: usize,
@@ -59,6 +66,7 @@ struct ViewTick {
     tree_sel: usize,
     tree_scroll: usize,
     tree_filter: usize,
+    filter_cursor: usize,
     tree_filtering: bool,
     tree_cwd: String,
     preview_scroll: u16,
@@ -77,6 +85,7 @@ struct ViewTick {
     git_state: dd_vault_core::GitState,
     ai_size: crate::ai::AiSize,
     ai_draft: usize,
+    ai_cursor: usize,
     ai_stream: usize,
     ai_scroll: u16,
     ai_transcript: usize,
@@ -105,6 +114,14 @@ impl ViewTick {
             Some(Modal::Notice { .. }) => (0, 0, 0, 6),
             None => (0, 0, 0, 0),
         };
+        let modal_cursor = match &app.modal {
+            Some(
+                Modal::Prompt { cursor, .. }
+                | Modal::Finder { cursor, .. }
+                | Modal::Palette { cursor, .. },
+            ) => *cursor,
+            _ => 0,
+        };
         Self {
             pane: app.pane,
             show_help: app.show_help,
@@ -116,10 +133,20 @@ impl ViewTick {
                 .map(|editor| editor.selected)
                 .or_else(|| app.theme_picker.as_ref().map(|picker| picker.selected))
                 .unwrap_or(0),
+            hex_cursor: app
+                .theme_editor
+                .as_ref()
+                .map(|editor| editor.hex_cursor)
+                .unwrap_or(0),
+            hex_edit: app
+                .theme_editor
+                .as_ref()
+                .is_some_and(|editor| editor.editing_hex),
             has_modal: app.modal.is_some(),
             modal_sel,
             modal_q,
             modal_n,
+            modal_cursor,
             prompt_kind,
             editor_mode: app.editor.mode,
             editor_cursor: app.editor.cursor(),
@@ -127,6 +154,7 @@ impl ViewTick {
             editor_scroll: app.editor.scroll,
             editor_off: app.editor.scroll_off,
             editor_cmd: app.editor.cmdline.len(),
+            cmd_cursor: app.editor.cmdline_cursor,
             editor_rel: app.editor.rel.clone(),
             editor_lines: app.editor.line_count(),
             editor_chars: app.editor.len_chars(),
@@ -134,6 +162,7 @@ impl ViewTick {
             tree_sel: app.tree.selected,
             tree_scroll: app.tree.scroll,
             tree_filter: app.tree.filter.len(),
+            filter_cursor: app.tree.filter_cursor,
             tree_filtering: app.tree.filtering,
             tree_cwd: app.tree.cwd.display().to_string(),
             preview_scroll: app.preview_scroll,
@@ -152,6 +181,7 @@ impl ViewTick {
             git_state: app.git.state,
             ai_size: app.ai.size,
             ai_draft: app.ai.draft.len(),
+            ai_cursor: app.ai.draft_cursor,
             ai_stream: app.ai.stream.len(),
             ai_scroll: app.ai.scroll,
             ai_transcript: app.ai.transcript.len(),
@@ -231,6 +261,7 @@ fn handle_theme(app: &mut App, evt: Event) -> Result<()> {
         Event::Mouse(m) => match m.kind {
             MouseEventKind::ScrollUp => scroll_theme(app, -1),
             MouseEventKind::ScrollDown => scroll_theme(app, 1),
+            MouseEventKind::Down(MouseButton::Left) => place_hex_click(app, m.column, m.row),
             _ => {}
         },
         _ => {}
@@ -239,6 +270,12 @@ fn handle_theme(app: &mut App, evt: Event) -> Result<()> {
 }
 
 fn handle_modal(app: &mut App, evt: Event) -> Result<()> {
+    if let Event::Mouse(m) = evt {
+        if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+            place_modal_click(app, m.column, m.row);
+        }
+        return Ok(());
+    }
     let Event::Key(k) = evt else {
         return Ok(());
     };
@@ -290,17 +327,11 @@ fn handle_prompt_key(app: &mut App, k: KeyEvent) {
     match k.code {
         KeyCode::Esc => app.modal = None,
         KeyCode::Enter => app.submit_prompt(),
-        KeyCode::Backspace => {
-            if let Some(Modal::Prompt { draft, .. }) = &mut app.modal {
-                draft.pop();
+        _ => {
+            if let Some(Modal::Prompt { draft, cursor, .. }) = &mut app.modal {
+                apply_line(draft, cursor, k, true);
             }
         }
-        KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) && !c.is_control() => {
-            if let Some(Modal::Prompt { draft, .. }) = &mut app.modal {
-                draft.push(c);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -312,19 +343,20 @@ fn handle_finder_key(app: &mut App, k: KeyEvent) {
         KeyCode::Up => finder_move(app, -1),
         KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => finder_move(app, 1),
         KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => finder_move(app, -1),
-        KeyCode::Backspace => {
-            if let Some(Modal::Finder { query, .. }) = &mut app.modal {
-                query.pop();
+        _ => {
+            let refresh = matches!(
+                k.code,
+                KeyCode::Backspace | KeyCode::Delete | KeyCode::Char(_)
+            );
+            let edited = if let Some(Modal::Finder { query, cursor, .. }) = &mut app.modal {
+                apply_line(query, cursor, k, false)
+            } else {
+                false
+            };
+            if edited && refresh {
+                app.refresh_finder();
             }
-            app.refresh_finder();
         }
-        KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) && !c.is_control() => {
-            if let Some(Modal::Finder { query, .. }) = &mut app.modal {
-                query.push(c);
-            }
-            app.refresh_finder();
-        }
-        _ => {}
     }
 }
 
@@ -336,19 +368,20 @@ fn handle_palette_key(app: &mut App, k: KeyEvent) {
         KeyCode::Up => palette_move(app, -1),
         KeyCode::Char('n') if k.modifiers.contains(KeyModifiers::CONTROL) => palette_move(app, 1),
         KeyCode::Char('p') if k.modifiers.contains(KeyModifiers::CONTROL) => palette_move(app, -1),
-        KeyCode::Backspace => {
-            if let Some(Modal::Palette { query, .. }) = &mut app.modal {
-                query.pop();
+        _ => {
+            let refresh = matches!(
+                k.code,
+                KeyCode::Backspace | KeyCode::Delete | KeyCode::Char(_)
+            );
+            let edited = if let Some(Modal::Palette { query, cursor, .. }) = &mut app.modal {
+                apply_line(query, cursor, k, false)
+            } else {
+                false
+            };
+            if edited && refresh {
+                app.refresh_palette();
             }
-            app.refresh_palette();
         }
-        KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) && !c.is_control() => {
-            if let Some(Modal::Palette { query, .. }) = &mut app.modal {
-                query.push(c);
-            }
-            app.refresh_palette();
-        }
-        _ => {}
     }
 }
 
@@ -547,6 +580,7 @@ fn map_edit_key(k: KeyEvent) -> Option<EditKey> {
         KeyCode::Esc => EditKey::Esc,
         KeyCode::Enter => EditKey::Enter,
         KeyCode::Backspace => EditKey::Backspace,
+        KeyCode::Delete => EditKey::Delete,
         KeyCode::Tab => EditKey::Tab,
         KeyCode::Up => EditKey::Up,
         KeyCode::Down => EditKey::Down,
@@ -566,15 +600,17 @@ fn handle_filter_key(app: &mut App, k: KeyEvent) -> Result<()> {
         KeyCode::Enter => {
             app.tree.filtering = false;
         }
-        KeyCode::Backspace => {
-            app.tree.filter.pop();
-            app.tree.selected = 0;
+        _ => {
+            let edited = apply_line(&mut app.tree.filter, &mut app.tree.filter_cursor, k, true);
+            if edited
+                && matches!(
+                    k.code,
+                    KeyCode::Backspace | KeyCode::Delete | KeyCode::Char(_)
+                )
+            {
+                app.tree.selected = 0;
+            }
         }
-        KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) && !c.is_control() => {
-            app.tree.filter.push(c);
-            app.tree.selected = 0;
-        }
-        _ => {}
     }
     Ok(())
 }
@@ -678,6 +714,21 @@ fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
         }
         MouseEventKind::Up(MouseButton::Left) if app.mouse_drag.is_some() => {
             app.mouse_editor_up();
+        }
+        MouseEventKind::Down(MouseButton::Left)
+            if text_click(app.cmd_line, &app.editor.cmdline, m.column, m.row).is_some() =>
+        {
+            if let Some(at) = text_click(app.cmd_line, &app.editor.cmdline, m.column, m.row) {
+                app.pane = Pane::Editor;
+                app.editor.cmdline_cursor = at;
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left)
+            if text_click(app.ai_line, &app.ai.draft, m.column, m.row).is_some() =>
+        {
+            if let Some(at) = text_click(app.ai_line, &app.ai.draft, m.column, m.row) {
+                app.ai.draft_cursor = at;
+            }
         }
         MouseEventKind::Down(MouseButton::Left) if contains(app.ai.area, m.column, m.row) => {
             if !app.ai.expanded() {
@@ -1028,6 +1079,9 @@ fn map_editor_key(k: KeyEvent) -> Option<ldnddev_theme::EditorKey> {
         KeyCode::Enter => ldnddev_theme::EditorKey::Enter,
         KeyCode::Esc => ldnddev_theme::EditorKey::Esc,
         KeyCode::Backspace => ldnddev_theme::EditorKey::Backspace,
+        KeyCode::Delete => ldnddev_theme::EditorKey::Delete,
+        KeyCode::Home => ldnddev_theme::EditorKey::Home,
+        KeyCode::End => ldnddev_theme::EditorKey::End,
         KeyCode::Char(c) => ldnddev_theme::EditorKey::Char(c),
         _ => return None,
     })
@@ -1074,4 +1128,89 @@ fn apply_split_drag(app: &mut App, x: u16, y: u16) {
 
 fn contains(area: ratatui::layout::Rect, x: u16, y: u16) -> bool {
     x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height
+}
+
+/// Up and Down move to the ends when `vertical` is set. A list field leaves them alone.
+fn apply_line(text: &mut String, cursor: &mut usize, k: KeyEvent, vertical: bool) -> bool {
+    if k.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    match k.code {
+        KeyCode::Backspace => {
+            line_backspace(text, cursor);
+            true
+        }
+        KeyCode::Delete => {
+            line_delete(text, cursor);
+            true
+        }
+        KeyCode::Left => {
+            line_left(cursor);
+            true
+        }
+        KeyCode::Right => {
+            line_right(text, cursor);
+            true
+        }
+        KeyCode::Home => {
+            line_home(cursor);
+            true
+        }
+        KeyCode::End => {
+            line_end(text, cursor);
+            true
+        }
+        KeyCode::Up if vertical => {
+            line_home(cursor);
+            true
+        }
+        KeyCode::Down if vertical => {
+            line_end(text, cursor);
+            true
+        }
+        KeyCode::Char(c) if !c.is_control() => {
+            line_insert(text, cursor, c);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn text_click(line: crate::app::TextLine, text: &str, col: u16, row: u16) -> Option<usize> {
+    if line.area.width == 0 || !contains(line.area, col, row) {
+        return None;
+    }
+    let local = col.saturating_sub(line.area.x).saturating_sub(line.prefix) as usize;
+    Some(line_click(text, local))
+}
+
+fn place_modal_click(app: &mut App, col: u16, row: u16) {
+    match &mut app.modal {
+        Some(Modal::Prompt { draft, cursor, .. }) => {
+            if let Some(at) = text_click(app.modal_line, draft, col, row) {
+                *cursor = at;
+            }
+        }
+        Some(Modal::Finder { query, cursor, .. }) => {
+            if let Some(at) = text_click(app.modal_line, query, col, row) {
+                *cursor = at;
+            }
+        }
+        Some(Modal::Palette { query, cursor, .. }) => {
+            if let Some(at) = text_click(app.modal_line, query, col, row) {
+                *cursor = at;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn place_hex_click(app: &mut App, col: u16, row: u16) {
+    let Some(editor) = app.theme_editor.as_mut() else {
+        return;
+    };
+    let Some(at) = text_click(app.hex_line, &editor.hex_draft, col, row) else {
+        return;
+    };
+    editor.place_hex_cursor(at);
 }

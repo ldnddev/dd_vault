@@ -39,6 +39,11 @@ pub enum FilterKey {
     Cancel,
     Stop,
     Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
     Type(char),
     Ignore,
 }
@@ -133,6 +138,11 @@ pub fn filter_key(press: KeyPress<'_>) -> FilterKey {
         "escape" => FilterKey::Cancel,
         "enter" | "return" => FilterKey::Stop,
         "backspace" => FilterKey::Backspace,
+        "delete" | "del" => FilterKey::Delete,
+        "left" => FilterKey::Left,
+        "right" => FilterKey::Right,
+        "home" | "up" => FilterKey::Home,
+        "end" | "down" => FilterKey::End,
         "space" => FilterKey::Type(' '),
         _ => match one_char(press.key_char.unwrap_or(press.key)) {
             Some(ch) if !ch.is_control() => FilterKey::Type(ch),
@@ -172,6 +182,7 @@ fn named(key: &str) -> Option<Key> {
         "escape" => Key::Esc,
         "enter" | "return" => Key::Enter,
         "backspace" => Key::Backspace,
+        "delete" | "del" => Key::Delete,
         "tab" => Key::Tab,
         "up" => Key::Up,
         "down" => Key::Down,
@@ -290,6 +301,12 @@ mod tests {
         assert_eq!(
             filter_key(press("backspace", None, false)),
             FilterKey::Backspace
+        );
+        assert_eq!(filter_key(press("left", None, false)), FilterKey::Left);
+        assert_eq!(filter_key(press("up", None, false)), FilterKey::Home);
+        assert_eq!(
+            filter_key(press("j", Some("j"), false)),
+            FilterKey::Type('j')
         );
     }
 }

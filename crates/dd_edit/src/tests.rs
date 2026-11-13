@@ -167,6 +167,23 @@ fn command_w_requests_save() {
 }
 
 #[test]
+fn command_line_caret_inserts_before_the_end() {
+    let mut e = ed("x");
+    e.handle(Key::Char(':'));
+    e.handle(Key::Char('w'));
+    e.handle(Key::Char('q'));
+    e.handle(Key::Left);
+    e.handle(Key::Char('x'));
+    assert_eq!(e.cmdline, "wxq");
+    e.handle(Key::Home);
+    e.handle(Key::Delete);
+    assert_eq!(e.cmdline, "xq");
+    e.handle(Key::End);
+    e.handle(Key::Backspace);
+    assert_eq!(e.cmdline, "x");
+}
+
+#[test]
 fn command_git_subcommands() {
     use crate::GitOp;
     let mut e = ed("x");

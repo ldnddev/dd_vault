@@ -84,6 +84,7 @@ pub struct ProviderOutcome {
 pub struct AiCard {
     pub size: AiSize,
     pub draft: String,
+    pub draft_cursor: usize,
     pub transcript: Vec<String>,
     pub stream: String,
     pub scroll: usize,
@@ -99,6 +100,7 @@ impl Default for AiCard {
         Self {
             size: AiSize::Collapsed,
             draft: String::new(),
+            draft_cursor: 0,
             transcript: Vec::new(),
             stream: String::new(),
             scroll: 0,
@@ -387,9 +389,32 @@ impl AiCard {
                 self.cycle();
                 AiKey::Cycle
             }
-            "enter" | "return" => AiKey::Send(std::mem::take(&mut self.draft)),
+            "enter" | "return" => {
+                self.draft_cursor = 0;
+                AiKey::Send(std::mem::take(&mut self.draft))
+            }
             "backspace" => {
-                self.draft.pop();
+                dd_edit::line_backspace(&mut self.draft, &mut self.draft_cursor);
+                AiKey::Ignore
+            }
+            "delete" | "del" => {
+                dd_edit::line_delete(&mut self.draft, &mut self.draft_cursor);
+                AiKey::Ignore
+            }
+            "left" => {
+                dd_edit::line_left(&mut self.draft_cursor);
+                AiKey::Ignore
+            }
+            "right" => {
+                dd_edit::line_right(&self.draft, &mut self.draft_cursor);
+                AiKey::Ignore
+            }
+            "home" => {
+                dd_edit::line_home(&mut self.draft_cursor);
+                AiKey::Ignore
+            }
+            "end" => {
+                dd_edit::line_end(&self.draft, &mut self.draft_cursor);
                 AiKey::Ignore
             }
             "up" => {
@@ -402,7 +427,7 @@ impl AiCard {
             }
             _ => {
                 if let Some(ch) = ch {
-                    self.draft.push(ch);
+                    dd_edit::line_insert(&mut self.draft, &mut self.draft_cursor, ch);
                 }
                 AiKey::Ignore
             }
@@ -418,9 +443,10 @@ impl AiCard {
         lines.into_iter().skip(start).take(limit.max(1)).collect()
     }
 
-    pub fn draft_line(&self) -> Option<String> {
-        if self.expanded() {
-            Some(format!("{}▍", self.draft))
+    /// The draft line, hidden while a reply is streaming.
+    pub fn draft_field(&self) -> Option<(String, usize)> {
+        if self.expanded() && self.rx.is_none() {
+            Some((self.draft.clone(), self.draft_cursor))
         } else {
             None
         }
@@ -522,6 +548,25 @@ mod tests {
             replace: None,
             hops: Vec::new(),
         }
+    }
+
+    #[test]
+    fn draft_caret_inserts_in_the_middle() {
+        let mut card = AiCard {
+            size: AiSize::Chat,
+            ..AiCard::default()
+        };
+        card.on_key("a", Some('a'));
+        card.on_key("b", Some('b'));
+        card.on_key("left", None);
+        card.on_key("X", Some('X'));
+        assert_eq!(card.draft, "aXb");
+        assert_eq!(card.draft_cursor, 2);
+        card.on_key("backspace", None);
+        assert_eq!(card.draft, "ab");
+        card.on_key("home", None);
+        card.on_key("delete", None);
+        assert_eq!((card.draft.as_str(), card.draft_cursor), ("b", 0));
     }
 
     #[test]

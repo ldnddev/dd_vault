@@ -415,6 +415,72 @@ fn tree_lists_vault_dirs_hides_gitignore() {
 }
 
 #[test]
+fn rename_caret_moves_with_arrows_and_a_click() {
+    let (_dir, mut app) = vault_app();
+    let notes = app
+        .tree
+        .visible()
+        .iter()
+        .position(|row| row.name == "notes/")
+        .expect("notes");
+    app.tree.selected = notes;
+    app.tree.enter();
+    let hello = app
+        .tree
+        .visible()
+        .iter()
+        .position(|row| row.name == "hello.md")
+        .expect("hello");
+    app.tree.selected = hello;
+    send_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('X'), KeyModifiers::NONE);
+    match &app.modal {
+        Some(Modal::Prompt { draft, cursor, .. }) => {
+            assert_eq!(draft, "hello.mXd");
+            assert_eq!(*cursor, "hello.mX".chars().count());
+        }
+        other => panic!("rename prompt missing: {other:?}"),
+    }
+    let _ = buffer_text(&mut app, 100, 30);
+    assert!(app.modal_line.area.width > 0, "rename field was not drawn");
+    app.handle_event(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: app.modal_line.area.x,
+        row: app.modal_line.area.y,
+        modifiers: KeyModifiers::NONE,
+    }))
+    .expect("click");
+    send_key(&mut app, KeyCode::Char('Z'), KeyModifiers::NONE);
+    match &app.modal {
+        Some(Modal::Prompt { draft, cursor, .. }) => {
+            assert_eq!(draft, "Zhello.mXd");
+            assert_eq!(*cursor, 1);
+        }
+        other => panic!("rename prompt missing: {other:?}"),
+    }
+}
+
+#[test]
+fn hex_click_places_the_caret() {
+    let mut app = chrome_app();
+    send_key(&mut app, KeyCode::F(2), KeyModifiers::NONE);
+    assert!(app.theme_editor.is_some());
+    let _ = buffer_text(&mut app, 120, 40);
+    assert!(app.hex_line.area.width > 5, "hex field was not drawn");
+    app.handle_event(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: app.hex_line.area.x + app.hex_line.prefix,
+        row: app.hex_line.area.y,
+        modifiers: KeyModifiers::NONE,
+    }))
+    .expect("click");
+    let editor = app.theme_editor.as_ref().expect("editor");
+    assert!(editor.editing_hex);
+    assert_eq!(editor.hex_cursor, 0);
+}
+
+#[test]
 fn tree_opens_at_vault_root() {
     let (_dir, app) = vault_app();
     let names: Vec<_> = app.tree.visible().iter().map(|r| r.name.clone()).collect();

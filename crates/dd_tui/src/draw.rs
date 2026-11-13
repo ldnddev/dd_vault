@@ -4,13 +4,17 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Modal, Pane, PreviewCache, PromptKind};
+use crate::app::{App, Modal, Pane, PreviewCache, PromptKind, TextLine};
 use crate::help::{build_help_text, build_theme_text, count_wrapped_lines};
 use crate::toasts::render_toasts;
 use crate::tree::{middle_ellipsis, name_column_budget, tree_title_text, VisibleRow};
 use dd_vault_core::NodeKind;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    app.modal_line = TextLine::default();
+    app.cmd_line = TextLine::default();
+    app.ai_line = TextLine::default();
+    app.hex_line = TextLine::default();
     frame.render_widget(Block::default().style(app.theme.app_shell), frame.area());
 
     let root = Layout::default()
@@ -162,9 +166,15 @@ fn render_ai_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         chunks[0],
     );
     let hint = if app.ai.rx.is_some() {
-        "Esc cancel".into()
+        Line::from("Esc cancel")
     } else {
-        format!("> {}█", app.ai.draft)
+        if app.ai.expanded() {
+            app.ai_line = TextLine {
+                area: chunks[1],
+                prefix: 2,
+            };
+        }
+        caret_line("> ", &app.ai.draft, app.ai.draft_cursor, false)
     };
     frame.render_widget(
         Paragraph::new(hint).style(
@@ -360,7 +370,7 @@ fn render_body(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn render_theme_editor(frame: &mut Frame, app: &App, editor: &ldnddev_theme::ThemeEditor) {
+fn render_theme_editor(frame: &mut Frame, app: &mut App, editor: &ldnddev_theme::ThemeEditor) {
     use ldnddev_theme::{theme_editor_rows, ThemeEditorRow};
     let area = centered_rect(80, 80, frame.area());
     frame.render_widget(Clear, area);
@@ -373,19 +383,22 @@ fn render_theme_editor(frame: &mut Frame, app: &App, editor: &ldnddev_theme::The
             app.theme.source.label(),
             app.theme.version
         )),
-        Line::from(if editor.editing_hex {
-            format!("Hex: {}█   Y save   R reset   Esc back", editor.hex_draft)
+        if editor.editing_hex {
+            let mut spans = vec![Span::raw("Hex: ")];
+            spans.extend(caret_spans(&editor.hex_draft, editor.hex_cursor, false));
+            spans.push(Span::raw("   Y save   R reset   Esc back"));
+            Line::from(spans)
         } else if app.theme_picker.is_some() {
-            format!(
+            Line::from(format!(
                 "Hex: {}   Enter edit   +/- nudge   Y save   R reset   Esc back",
                 editor.hex_draft
-            )
+            ))
         } else {
-            format!(
+            Line::from(format!(
                 "Hex: {}   Enter edit   +/- nudge   Y save   R reset   Esc revert",
                 editor.hex_draft
-            )
-        }),
+            ))
+        },
         Line::from(""),
     ];
     let view_h = area.height.saturating_sub(6) as usize;
@@ -431,6 +444,17 @@ fn render_theme_editor(frame: &mut Frame, app: &App, editor: &ldnddev_theme::The
             }
         }
     }
+    let hex_cols = (editor.hex_draft.chars().count() as u16).saturating_add(1);
+    let inner_w = area.width.saturating_sub(2);
+    app.hex_line = TextLine {
+        area: Rect {
+            x: area.x.saturating_add(1),
+            y: area.y.saturating_add(2),
+            width: 5u16.saturating_add(hex_cols).min(inner_w.max(1)),
+            height: 1,
+        },
+        prefix: 5,
+    };
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
@@ -610,13 +634,16 @@ fn render_vault_picker(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_palette(frame: &mut Frame, app: &App) {
-    let Some(Modal::Palette {
-        query,
-        selected,
-        items,
-    }) = &app.modal
-    else {
+fn render_palette(frame: &mut Frame, app: &mut App) {
+    let Some((query, cursor, selected, items)) = (match &app.modal {
+        Some(Modal::Palette {
+            query,
+            cursor,
+            selected,
+            items,
+        }) => Some((query.clone(), *cursor, *selected, items.clone())),
+        _ => None,
+    }) else {
         return;
     };
     let area = centered_rect(70, 70, frame.area());
@@ -641,8 +668,12 @@ fn render_palette(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(inner);
+    app.modal_line = TextLine {
+        area: chunks[0],
+        prefix: 2,
+    };
     frame.render_widget(
-        Paragraph::new(format!("> {query}█")).style(
+        Paragraph::new(caret_line("> ", &query, cursor, false)).style(
             Style::default()
                 .fg(app.theme.input_text_focus)
                 .bg(app.theme.modal_background),
@@ -653,8 +684,8 @@ fn render_palette(frame: &mut Frame, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            let marker = if i == *selected { ">" } else { " " };
-            let style = if i == *selected {
+            let marker = if i == selected { ">" } else { " " };
+            let style = if i == selected {
                 Style::default()
                     .fg(app.theme.text_active_focus)
                     .bg(app.theme.selected_background)
@@ -670,15 +701,18 @@ fn render_palette(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(lines), chunks[1]);
 }
 
-fn render_finder(frame: &mut Frame, app: &App) {
+fn render_finder(frame: &mut Frame, app: &mut App) {
     use crate::app::FinderKind;
-    let Some(Modal::Finder {
-        kind,
-        query,
-        selected,
-        hits,
-    }) = &app.modal
-    else {
+    let Some((kind, query, cursor, selected, hits)) = (match &app.modal {
+        Some(Modal::Finder {
+            kind,
+            query,
+            cursor,
+            selected,
+            hits,
+        }) => Some((*kind, query.clone(), *cursor, *selected, hits.clone())),
+        _ => None,
+    }) else {
         return;
     };
     let title = match kind {
@@ -709,8 +743,12 @@ fn render_finder(frame: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(inner);
+    app.modal_line = TextLine {
+        area: chunks[0],
+        prefix: 2,
+    };
     frame.render_widget(
-        Paragraph::new(format!("> {query}█")).style(
+        Paragraph::new(caret_line("> ", &query, cursor, false)).style(
             Style::default()
                 .fg(app.theme.input_text_focus)
                 .bg(app.theme.modal_background),
@@ -721,7 +759,7 @@ fn render_finder(frame: &mut Frame, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, hit)| {
-            let marker = if i == *selected { ">" } else { " " };
+            let marker = if i == selected { ">" } else { " " };
             let mut label = format!("{marker} {}", hit.title);
             if hit.title != hit.path {
                 label.push_str(&format!("  {}", hit.path));
@@ -729,7 +767,7 @@ fn render_finder(frame: &mut Frame, app: &App) {
             if let Some(sn) = &hit.snippet {
                 label.push_str(&format!("  {sn}"));
             }
-            let style = if i == *selected {
+            let style = if i == selected {
                 Style::default()
                     .fg(app.theme.text_active_focus)
                     .bg(app.theme.selected_background)
@@ -1098,8 +1136,18 @@ fn render_editor(frame: &mut Frame, app: &mut App, editor_border: ratatui::style
             width: inner.width,
             height: 1,
         };
+        app.cmd_line = TextLine {
+            area: cmd_area,
+            prefix: 1,
+        };
         frame.render_widget(
-            Paragraph::new(format!("{prefix}{}█", app.editor.cmdline)).style(
+            Paragraph::new(caret_line(
+                prefix,
+                &app.editor.cmdline,
+                app.editor.cmdline_cursor,
+                false,
+            ))
+            .style(
                 Style::default()
                     .fg(app.theme.input_text_focus)
                     .bg(app.theme.modal_background),
@@ -1428,11 +1476,23 @@ fn render_tree_rows(
     );
 }
 
-fn render_prompt(frame: &mut Frame, app: &App) {
-    let Some(Modal::Prompt { kind, draft }) = &app.modal else {
+fn render_prompt(frame: &mut Frame, app: &mut App) {
+    let Some((kind, draft, cursor, mask)) = (match &app.modal {
+        Some(Modal::Prompt {
+            kind,
+            draft,
+            cursor,
+        }) => Some((
+            kind.clone(),
+            draft.clone(),
+            *cursor,
+            matches!(kind, PromptKind::AiKey { .. }),
+        )),
+        _ => None,
+    }) else {
         return;
     };
-    let title = match kind {
+    let title = match &kind {
         PromptKind::New { parent } => {
             let loc = if parent.as_os_str().is_empty() {
                 "/".to_string()
@@ -1468,14 +1528,7 @@ fn render_prompt(frame: &mut Frame, app: &App) {
         );
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let input = match kind {
-        PromptKind::AiKey { .. } => {
-            let dots: String = "•".repeat(draft.chars().count());
-            format!("{dots}█")
-        }
-        _ => format!("{draft}█"),
-    };
-    let hint = match kind {
+    let hint = match &kind {
         PromptKind::AiProvider => {
             "openrouter · ollama (local) · spacexai   Enter confirm   Esc cancel"
         }
@@ -1497,8 +1550,12 @@ fn render_prompt(frame: &mut Frame, app: &App) {
             Constraint::Min(0),
         ])
         .split(inner);
+    app.modal_line = TextLine {
+        area: chunks[0],
+        prefix: 0,
+    };
     frame.render_widget(
-        Paragraph::new(input).style(
+        Paragraph::new(caret_line("", &draft, cursor, mask)).style(
             Style::default()
                 .fg(app.theme.input_text_focus)
                 .bg(app.theme.modal_background),
@@ -1509,6 +1566,24 @@ fn render_prompt(frame: &mut Frame, app: &App) {
         Paragraph::new(hint).style(Style::default().fg(app.theme.text_secondary)),
         chunks[1],
     );
+}
+
+fn caret_spans(text: &str, cursor: usize, mask: bool) -> Vec<Span<'static>> {
+    let (before, cell, after) = dd_edit::line_parts(text, cursor, mask);
+    vec![
+        Span::raw(before),
+        Span::styled(cell, Style::default().add_modifier(Modifier::REVERSED)),
+        Span::raw(after),
+    ]
+}
+
+fn caret_line(prefix: &str, text: &str, cursor: usize, mask: bool) -> Line<'static> {
+    let mut spans = Vec::new();
+    if !prefix.is_empty() {
+        spans.push(Span::raw(prefix.to_string()));
+    }
+    spans.extend(caret_spans(text, cursor, mask));
+    Line::from(spans)
 }
 
 fn render_notice(frame: &mut Frame, app: &App) {

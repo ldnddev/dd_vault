@@ -91,6 +91,7 @@ impl App {
         self.modal = Some(Modal::Prompt {
             kind: PromptKind::GitCommit { then_push },
             draft: String::new(),
+            cursor: 0,
         });
     }
 

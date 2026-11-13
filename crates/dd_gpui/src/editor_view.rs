@@ -82,12 +82,24 @@ pub fn remember_session(session: &mut Session, write: SessionWrite<'_>) {
     session.preview_split = write.preview_split;
 }
 
-pub fn prompt_line(editor: &Editor) -> Option<String> {
-    match editor.mode {
-        Mode::Command => Some(format!(":{}", editor.cmdline)),
-        Mode::Search => Some(format!("/{}", editor.cmdline)),
-        _ => None,
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptLine {
+    pub prefix: char,
+    pub text: String,
+    pub cursor: usize,
+}
+
+pub fn prompt_line(editor: &Editor) -> Option<PromptLine> {
+    let prefix = match editor.mode {
+        Mode::Command => ':',
+        Mode::Search => '/',
+        _ => return None,
+    };
+    Some(PromptLine {
+        prefix,
+        text: editor.cmdline.clone(),
+        cursor: editor.cmdline_cursor,
+    })
 }
 
 /// `wrap_width` is `usize::MAX` when wrap is off. `clip_cols` cuts a non-wrapping row.

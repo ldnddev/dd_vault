@@ -184,6 +184,7 @@ impl App {
         self.leader = Leader::None;
         self.modal = Some(Modal::Palette {
             query: String::new(),
+            cursor: 0,
             selected: 0,
             items: PALETTE_ITEMS.to_vec(),
         });

@@ -1,6 +1,6 @@
 # dd_vault
 
-Keyboard-first, vim-flavored markdown vault. Two programs share one vault on disk: `dd_vault` in the terminal, and `dd_vault-gui` in a desktop window. Files on disk are the source of truth. Version 0.1.14. Linux and macOS. MIT.
+Keyboard-first, vim-flavored markdown vault. Two programs share one vault on disk: `dd_vault` in the terminal, and `dd_vault-gui` in a desktop window. Files on disk are the source of truth. Version 0.1.15. Linux and macOS. MIT.
 
 The terminal app builds with Rust 1.82 or newer. The desktop window needs Rust 1.92 or newer, Vulkan (`libvulkan1` and a driver), and Wayland or X11. The tutorial screenshots are the terminal.
 
@@ -11,11 +11,21 @@ curl -fsSL https://raw.githubusercontent.com/ldnddev/dd_vault/main/install.sh | 
 dd_vault init ~/Notes && dd_vault open ~/Notes
 ```
 
-`install.sh` builds the terminal app with `cargo build --release --locked` and installs `dd_vault` to `~/.local/bin` (`PREFIX` overrides the root). Set `INSTALL_GUI=1` to also install `dd_vault-gui`. See [docs/INSTALL.md](docs/INSTALL.md). With no arguments, `dd_vault` opens the last vault from `~/.config/ldnddev/vaults.toml`, or a picker. `dd_vault init [path]` creates `notes/`, `notes/daily/`, `notes/projects/`, `assets/`, `.gitignore`, and `.dd_vault-<name>/`. `dd_vault --reindex [path]` rebuilds the search index and exits.
+That builds the terminal app only. To install the desktop window as well, put `INSTALL_GUI=1` on the `bash` that runs the script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ldnddev/dd_vault/main/install.sh | INSTALL_GUI=1 bash
+```
+
+From a clone, the same switch is `INSTALL_GUI=1 ./install.sh`.
+
+`install.sh` builds the terminal app with `cargo build --release --locked` and installs `dd_vault` to `~/.local/bin` (`PREFIX` overrides the root). With `INSTALL_GUI=1` it also installs `dd_vault-gui` beside it. On Linux it writes a launcher for each installed program (`dd_vault.desktop`, and `dd_vault-gui.desktop` when that binary is installed). `./install.sh --uninstall` removes those binaries and launchers and leaves vaults and `~/.config/ldnddev` in place. See [docs/INSTALL.md](docs/INSTALL.md). With no arguments, `dd_vault` opens the last vault from `~/.config/ldnddev/vaults.toml`, or a picker. `dd_vault init [path]` creates `notes/`, `notes/daily/`, `notes/projects/`, `assets/`, `.gitignore`, and `.dd_vault-<name>/`. `dd_vault --reindex [path]` rebuilds the search index and exits.
 
 ## Desktop window
 
-`dd_vault-gui` uses the same keys, theme file, and `session.toml` as the terminal. F1 is help. F2 lists Omarchy themes. `<Space>h` is zen, `<Space>z` hides the tree, `<Space>e` shows it. Drag a pane border to resize. The footer keeps F1, F2, and quit. Transient messages are toasts above that footer. The default install does not build this program.
+Install it with the curl command above, or `INSTALL_GUI=1 ./install.sh` from a clone. The default install does not build this program.
+
+`dd_vault-gui` uses the same keys, theme file, and `session.toml` as the terminal. F1 is help. F2 lists Omarchy themes. `<Space>h` is zen, `<Space>z` hides the tree, `<Space>e` shows it. Drag a pane border to resize. The footer keeps F1, F2, and quit. Transient messages are toasts above that footer.
 
 ## Using it
 
