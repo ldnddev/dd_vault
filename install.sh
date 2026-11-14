@@ -243,6 +243,9 @@ main() {
   say "Done. Try: dd_vault --help"
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+# `curl | bash` reads this file from stdin. BASH_SOURCE is unset then, and
+# `set -u` aborts on a bare ${BASH_SOURCE[0]}. An empty source means the
+# file is being executed, not sourced.
+if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]:-}" == "$0" ]]; then
   main "$@"
 fi
