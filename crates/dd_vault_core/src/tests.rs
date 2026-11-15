@@ -56,6 +56,33 @@ fn open_after_init() {
 }
 
 #[test]
+fn deleted_note_folders_stay_deleted() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let root = dir.path().join("vault");
+    let vault = init(&root).expect("init");
+    fs::remove_dir_all(root.join("notes/daily")).expect("rm daily");
+    fs::remove_dir_all(root.join("notes/projects")).expect("rm projects");
+    fs::create_dir_all(root.join("notes/archive")).expect("archive");
+    fs::remove_dir_all(root.join("notes/archive")).expect("rm archive");
+
+    open(&root).expect("open");
+    reindex(&vault).expect("reindex");
+    init(&root).expect("init again");
+    assert!(!root.join("notes/daily").exists());
+    assert!(!root.join("notes/projects").exists());
+    assert!(!root.join("notes/archive").exists());
+    assert!(root.join("notes").is_dir());
+
+    fs::remove_dir_all(root.join("notes")).expect("rm notes");
+    fs::remove_dir_all(root.join("assets")).expect("rm assets");
+    open(&root).expect("open roots");
+    assert!(root.join("notes").is_dir());
+    assert!(root.join("assets").is_dir());
+    assert!(!root.join("notes/daily").exists());
+    assert!(!root.join("notes/projects").exists());
+}
+
+#[test]
 fn open_missing_path() {
     let err = open(Path::new("/no/such/dd-vault-path-xyz")).expect_err("missing");
     assert!(matches!(err, Error::NotFound(_)));

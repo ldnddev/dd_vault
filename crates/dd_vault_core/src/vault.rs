@@ -71,8 +71,14 @@ pub fn init(path: &Path) -> Result<Vault, Error> {
         Some(existing) => existing,
         None => metadata_dir(&root, &name),
     };
+    // Seed `notes/daily` and `notes/projects` only for a new vault. A later
+    // init, open, or reindex must leave a deleted folder deleted.
+    let fresh = !meta.exists();
     fs::create_dir_all(&meta)?;
     ensure_layout(&root, &meta)?;
+    if fresh {
+        seed_note_folders(&root)?;
+    }
     Ok(Vault {
         name,
         root,
@@ -140,12 +146,21 @@ pub fn ensure_layout(root: &Path, meta: &Path) -> Result<(), Error> {
     if !config.exists() {
         fs::write(&config, DEFAULT_VAULT_CONFIG)?;
     }
-    for rel in ["notes", "notes/daily", "notes/projects", "assets"] {
+    // Subfolders of `notes` are the user's. Recreating them here undoes a
+    // delete, because open and reindex both call this.
+    for rel in ["notes", "assets"] {
         fs::create_dir_all(root.join(rel))?;
     }
     let gitignore = root.join(".gitignore");
     if !gitignore.exists() {
         fs::write(&gitignore, GITIGNORE)?;
+    }
+    Ok(())
+}
+
+fn seed_note_folders(root: &Path) -> Result<(), Error> {
+    for rel in ["notes/daily", "notes/projects"] {
+        fs::create_dir_all(root.join(rel))?;
     }
     Ok(())
 }
