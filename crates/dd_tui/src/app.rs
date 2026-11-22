@@ -4,7 +4,10 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -230,6 +233,10 @@ pub struct App {
     pub show_help: bool,
     pub help_scroll: u16,
     pub help_scroll_max: u16,
+    /// Draw should scroll the settings sheet to the Help section once.
+    pub settings_jump_help: bool,
+    /// Draw should keep the highlighted settings row on screen once.
+    pub settings_follow: bool,
     pub show_theme: bool,
     pub theme_picker: Option<ldnddev_theme::ThemePicker>,
     pub theme_editor: Option<ldnddev_theme::ThemeEditor>,
@@ -331,7 +338,14 @@ impl App {
     }
 
     pub fn open_theme_ui(&mut self) {
+        if self.show_theme {
+            return;
+        }
+        self.show_help = false;
         self.show_theme = true;
+        self.settings_jump_help = false;
+        self.settings_follow = true;
+        self.help_scroll = 0;
         self.leader = Leader::None;
         let palette = crate::theme::palette_from_theme(&self.theme);
         let picker = ldnddev_theme::ThemePicker::new(
@@ -349,6 +363,26 @@ impl App {
                 crate::theme::extra_theme_fields(),
             ));
         }
+    }
+
+    /// Open Settings and scroll to the Help section.
+    /// An open color editor returns to the theme list when that list exists.
+    pub fn show_settings_help(&mut self) {
+        if !self.show_theme {
+            self.open_theme_ui();
+        } else if self.theme_picker.is_some() {
+            let editor = self.theme_editor.take();
+            if let Some(editor) = editor {
+                if let Some(picker) = self.theme_picker.as_mut() {
+                    picker.palette = editor.palette.clone();
+                    picker.save_target = editor.save_target;
+                }
+                crate::theme::apply_palette(&mut self.theme, &editor.palette);
+            }
+        }
+        self.settings_jump_help = true;
+        self.settings_follow = false;
+        self.show_help = false;
     }
 
     pub fn new(theme: AppTheme) -> Self {
@@ -373,6 +407,8 @@ impl App {
             show_help: false,
             help_scroll: 0,
             help_scroll_max: 0,
+            settings_jump_help: false,
+            settings_follow: false,
             show_theme: false,
             theme_picker: None,
             theme_editor: None,
@@ -758,10 +794,7 @@ impl App {
                 let rel = std::path::PathBuf::from(name);
                 self.open_file(rel);
             }
-            Action::Help => {
-                self.show_help = true;
-                self.help_scroll = 0;
-            }
+            Action::Help => self.show_settings_help(),
             Action::Error(msg) => self.push_toast(ToastLevel::Error, msg),
             Action::Info(msg) => self.push_toast(ToastLevel::Info, msg),
             Action::WikiPicker => self.open_finder(FinderKind::Wiki),
@@ -1128,18 +1161,18 @@ impl App {
         }
         if self.show_help || self.show_theme || self.modal.is_some() {
             return if width < 80 {
-                "F1:Help  Esc:Close  ^Q:Quit".to_string()
+                "F1:Settings  Esc:Close  ^Q:Quit".to_string()
             } else {
-                "F1: Help  Esc: Close  Ctrl+Q: Quit".to_string()
+                "F1: Settings  Esc: Close  Ctrl+Q: Quit".to_string()
             };
         }
 
-        let (f1, f2, quit) = if width < 80 {
-            ("F1:Help", "F2:Theme", "^Q:Quit")
+        let (f1, quit) = if width < 80 {
+            ("F1:Settings", "^Q:Quit")
         } else {
-            ("F1: Help", "F2: Theme", "Ctrl+Q: Quit")
+            ("F1: Settings", "Ctrl+Q: Quit")
         };
-        let left = [f1, f2];
+        let left = [f1];
 
         if self.leader != Leader::None {
             let (middle, cancel) = leader_footer(self.leader);
@@ -1200,7 +1233,7 @@ impl App {
 }
 
 /// One footer row. Drops context tokens from the right when `width` is tight.
-/// `left` and `right` stay, so F1, F2, and quit (or Esc on a chord) remain.
+/// `left` and `right` stay, so F1 and quit (or Esc on a chord) remain.
 fn fit_footer(width: u16, left: &[&str], middle: &[&str], right: &[&str]) -> String {
     let limit = width as usize;
     let mut mid: Vec<&str> = middle.to_vec();
@@ -1245,7 +1278,12 @@ pub fn run(initial: Option<Vault>) -> Result<()> {
     let load = AppTheme::load();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1257,6 +1295,7 @@ pub fn run(initial: Option<Vault>) -> Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;

@@ -22,7 +22,7 @@ fn send_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
 fn chrome_app() -> App {
     let mut app = App::new(AppTheme::default());
     app.header_copy = "Files on disk. Opinions in git.".to_string();
-    // No Omarchy themes here, so F2 opens the hex editor directly.
+    // No Omarchy themes here, so F1 opens the hex editor directly.
     app.omarchy_paths = ldnddev_theme::OmarchyPaths::from_root(std::path::Path::new(
         "/nonexistent/dd_vault_omarchy",
     ));
@@ -50,13 +50,72 @@ fn buffer_text(app: &mut App, width: u16, height: u16) -> String {
 fn f1_opens_and_closes() {
     let mut app = chrome_app();
     send_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
-    assert!(app.show_help);
-    send_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+    assert!(app.show_theme);
+    assert!(app.theme_editor.is_some());
     assert!(!app.show_help);
+    send_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+    assert!(!app.show_theme);
 }
 
 #[test]
-fn f2_lists_omarchy_themes_and_esc_reverts() {
+fn bracketed_paste_lands_in_one_step() {
+    let mut app = chrome_app();
+    app.pane = Pane::Editor;
+    send_key(&mut app, KeyCode::Char('i'), KeyModifiers::NONE);
+    app.handle_event(Event::Paste("ab\r\ncd\u{1b}e[[".into()))
+        .expect("paste");
+    assert_eq!(app.editor.mode, dd_edit::Mode::Insert);
+    assert_eq!(app.editor.text(), "ab\ncde[[");
+    assert!(app.modal.is_none());
+    send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
+    assert_eq!(app.editor.text(), "");
+}
+
+#[test]
+fn paste_into_a_prompt_stays_one_line() {
+    let mut app = chrome_app();
+    app.modal = Some(Modal::Prompt {
+        kind: crate::app::PromptKind::AiModel,
+        draft: "m".into(),
+        cursor: 1,
+    });
+    app.paste_text("x\ny\r");
+    match app.modal {
+        Some(Modal::Prompt { draft, cursor, .. }) => {
+            assert_eq!((draft.as_str(), cursor), ("mxy", 3));
+        }
+        other => panic!("prompt stayed open: {other:?}"),
+    }
+}
+
+#[test]
+fn paste_into_the_tree_filter_stays_one_line() {
+    let mut app = chrome_app();
+    send_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+    assert!(app.tree.filtering);
+    app.paste_text("ab\nc");
+    assert_eq!(
+        (app.tree.filter.as_str(), app.tree.filter_cursor),
+        ("abc", 3)
+    );
+}
+
+#[test]
+fn paste_while_help_is_open_does_not_change_the_note() {
+    let mut app = chrome_app();
+    app.pane = Pane::Editor;
+    send_key(&mut app, KeyCode::Char('i'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::Char('X'), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+    app.handle_event(Event::Paste("nope".into()))
+        .expect("paste");
+    assert_eq!(app.editor.text(), "X");
+    assert!(app.show_theme);
+}
+
+#[test]
+fn f1_lists_omarchy_themes_and_esc_reverts() {
     let dir = tempfile::tempdir().expect("tmp");
     let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../ldnddev_theme/tests/fixtures/omarchy/tokyo-night/colors.toml");
@@ -69,7 +128,7 @@ fn f2_lists_omarchy_themes_and_esc_reverts() {
     let mut app = chrome_app();
     app.omarchy_paths = ldnddev_theme::OmarchyPaths::from_root(dir.path());
     let before = crate::theme::color_to_hex(app.theme.body_background);
-    send_key(&mut app, KeyCode::F(2), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
     assert!(app.show_theme);
     assert!(app.theme_picker.is_some());
     assert!(app.theme_editor.is_none());
@@ -93,9 +152,9 @@ fn f2_lists_omarchy_themes_and_esc_reverts() {
 }
 
 #[test]
-fn f2_opens_editor_and_esc_closes() {
+fn f1_opens_editor_and_esc_closes() {
     let mut app = chrome_app();
-    send_key(&mut app, KeyCode::F(2), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
     assert!(app.show_theme);
     assert!(app.theme_editor.is_some());
     send_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
@@ -103,6 +162,26 @@ fn f2_opens_editor_and_esc_closes() {
     send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     assert!(!app.show_theme);
     assert!(app.theme_editor.is_none());
+}
+
+#[test]
+fn settings_page_scrolls_without_moving_the_row() {
+    let mut app = chrome_app();
+    send_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+    let _ = buffer_text(&mut app, 80, 20);
+    let selected = app.theme_editor.as_ref().unwrap().selected;
+    send_key(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+    assert!(app.help_scroll > 0, "page down should scroll the sheet");
+    assert_eq!(app.theme_editor.as_ref().unwrap().selected, selected);
+    app.handle_event(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 70,
+        row: 8,
+        modifiers: KeyModifiers::NONE,
+    }))
+    .expect("wheel");
+    assert!(app.help_scroll > 10);
+    assert_eq!(app.theme_editor.as_ref().unwrap().selected, selected);
 }
 
 #[test]
@@ -119,10 +198,10 @@ fn footer_starts_with_f1_help_then_f2_theme() {
     let app = chrome_app();
     let narrow = app.footer_hint(70);
     let wide = app.footer_hint(140);
-    assert!(narrow.starts_with("F1:Help"), "{narrow}");
-    assert!(narrow.contains("F2:Theme"), "{narrow}");
-    assert!(wide.starts_with("F1: Help"), "{wide}");
-    assert!(wide.contains("F2: Theme"), "{wide}");
+    assert!(narrow.starts_with("F1:Settings"), "{narrow}");
+    assert!(!narrow.contains("F2"), "{narrow}");
+    assert!(wide.starts_with("F1: Settings"), "{wide}");
+    assert!(!wide.contains("F2"), "{wide}");
 }
 
 #[test]
@@ -130,11 +209,11 @@ fn footer_follows_pane_mode_and_leader() {
     let mut app = chrome_app();
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  <Space>vv: Open vault  Ctrl+Q: Quit"
+        "F1: Settings  <Space>vv: Open vault  Ctrl+Q: Quit"
     );
     assert_eq!(
         app.footer_hint(70),
-        "F1:Help  F2:Theme  <Space>vv: Open vault  ^Q:Quit"
+        "F1:Settings  <Space>vv: Open vault  ^Q:Quit"
     );
 
     app.vault = Some(Vault {
@@ -144,47 +223,47 @@ fn footer_follows_pane_mode_and_leader() {
     });
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  j/k: Move  Enter: Open  a: New  h/l: Folder  /: Filter  Ctrl+Q: Quit"
+        "F1: Settings  j/k: Move  Enter: Open  a: New  h/l: Folder  /: Filter  Ctrl+Q: Quit"
     );
     assert_eq!(
         app.footer_hint(60),
-        "F1:Help  F2:Theme  j/k: Move  Enter: Open  a: New  ^Q:Quit"
+        "F1:Settings  j/k: Move  Enter: Open  a: New  ^Q:Quit"
     );
 
     app.pane = Pane::Editor;
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  i: Insert  :w: Save  gf: Follow  Ctrl+Q: Quit"
+        "F1: Settings  i: Insert  :w: Save  gf: Follow  Ctrl+Q: Quit"
     );
     app.editor.mode = dd_edit::Mode::Insert;
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  Esc: Normal  Ctrl+S: Save  [[: Link  Ctrl+Q: Quit"
+        "F1: Settings  Esc: Normal  Ctrl+S: Save  [[: Link  Ctrl+Q: Quit"
     );
     app.editor.mode = dd_edit::Mode::Visual;
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  y: Yank  d: Delete  Esc: Normal  Ctrl+Q: Quit"
+        "F1: Settings  y: Yank  d: Delete  Esc: Normal  Ctrl+Q: Quit"
     );
     app.editor.mode = dd_edit::Mode::Command;
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  Enter: Run  Esc: Cancel  Ctrl+Q: Quit"
+        "F1: Settings  Enter: Run  Esc: Cancel  Ctrl+Q: Quit"
     );
     app.editor.mode = dd_edit::Mode::Normal;
     app.pane = Pane::Preview;
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  j/k: Scroll  g/G: Ends  Ctrl+click: Open  Ctrl+Q: Quit"
+        "F1: Settings  j/k: Scroll  g/G: Ends  Ctrl+click: Open  Ctrl+Q: Quit"
     );
 
     app.leader = Leader::Space;
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  Space…  p preview  P read  ff files  vv vault  sg search  nd daily  Esc cancel"
+        "F1: Settings  Space…  p preview  P read  ff files  vv vault  sg search  nd daily  Esc cancel"
     );
     let chord = app.footer_hint(70);
-    assert!(chord.starts_with("F1:Help  F2:Theme  Space…"), "{chord}");
+    assert!(chord.starts_with("F1:Settings  Space…"), "{chord}");
     assert!(chord.ends_with("Esc cancel"), "{chord}");
     assert!(chord.chars().count() <= 70, "{chord}");
     assert!(!chord.contains("nd daily"), "{chord}");
@@ -192,14 +271,14 @@ fn footer_follows_pane_mode_and_leader() {
     app.leader = Leader::SpaceV;
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  Space v…  v: vault picker  Esc: cancel"
+        "F1: Settings  Space v…  v: vault picker  Esc: cancel"
     );
 
     app.leader = Leader::None;
     app.ai.size = crate::ai::AiSize::Chat;
     assert_eq!(
         app.footer_hint(120),
-        "F1: Help  F2: Theme  Enter: Send  Esc: Close  Tab: Cycle  Ctrl+Q: Quit"
+        "F1: Settings  Enter: Send  Esc: Close  Tab: Cycle  Ctrl+Q: Quit"
     );
 
     app.ai.size = crate::ai::AiSize::Collapsed;
@@ -237,8 +316,8 @@ fn default_layout_snapshot_wide() {
     insta::assert_snapshot!(text);
     assert!(text.contains("dd_vault"));
     assert!(text.contains("no vault"));
-    assert!(text.contains("F1: Help"));
-    assert!(text.contains("F2: Theme"));
+    assert!(text.contains("F1: Settings"));
+    assert!(!text.contains("F2"));
     assert!(text.contains("NORMAL"));
 }
 
@@ -251,7 +330,7 @@ fn default_layout_snapshot_narrow() {
     assert_eq!(first_lines.len(), 3);
     let footer = text.lines().last().unwrap();
     assert!(footer.contains("F1:"), "{footer}");
-    assert!(footer.contains("F2:"), "{footer}");
+    assert!(!footer.contains("F2"), "{footer}");
 }
 
 #[test]
@@ -260,7 +339,8 @@ fn f1_help_snapshot() {
     send_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
     let text = buffer_text(&mut app, 100, 24);
     insta::assert_snapshot!(text);
-    assert!(text.contains("Key & Mouse bindings"));
+    assert!(text.contains("Settings"));
+    assert!(text.contains("body_background") || text.contains("background"));
 }
 
 #[test]
@@ -464,7 +544,7 @@ fn rename_caret_moves_with_arrows_and_a_click() {
 #[test]
 fn hex_click_places_the_caret() {
     let mut app = chrome_app();
-    send_key(&mut app, KeyCode::F(2), KeyModifiers::NONE);
+    send_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
     assert!(app.theme_editor.is_some());
     let _ = buffer_text(&mut app, 120, 40);
     assert!(app.hex_line.area.width > 5, "hex field was not drawn");

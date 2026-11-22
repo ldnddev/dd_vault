@@ -74,6 +74,16 @@ impl App {
     }
 }
 
+pub(crate) fn clipboard_text() -> Option<String> {
+    let mut cb = arboard::Clipboard::new().ok()?;
+    let text = cb.get_text().ok()?;
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 fn note_stem(rel: Option<&str>) -> String {
     let raw = rel
         .and_then(|r| Path::new(r).file_stem())

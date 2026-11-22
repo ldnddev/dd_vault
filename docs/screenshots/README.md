@@ -11,7 +11,7 @@ Used by `docs/index.html` (GitHub Pages).
 | `04-git.jpg` | `:git commit` modal |
 | `05-ai.jpg` | AI chat card |
 | `07-zen.jpg` | `Space h` zen |
-| `06-help.jpg` | `F1` help |
+| `06-help.jpg` | `F1` settings |
 
 ## Replace an image
 

@@ -1,7 +1,7 @@
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
-use crate::theme::{color_to_hex, AppTheme};
+use crate::theme::AppTheme;
 
 fn wrap_to_lines(text: &str, width: usize) -> Vec<String> {
     let w = width.max(1);
@@ -89,8 +89,7 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
         &mut lines,
         "Global",
         &[
-            ("F1", "Open/close this help"),
-            ("F2", "Omarchy themes (Enter apply, e edit, s save)"),
+            ("F1", "Open/close Settings (themes, colors, and this help)"),
             ("Ctrl+Q", "Quit"),
             ("Tab", "Focus tree → editor → preview"),
             (
@@ -131,19 +130,17 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
     );
     add_section(
         &mut lines,
-        "Help / Theme overlays",
+        "Settings",
         &[
-            ("F1 / Esc", "Close help"),
-            ("F2 / Esc", "Close theme (Esc reverts unsaved edits)"),
-            ("Enter", "Apply the highlighted Omarchy theme"),
+            ("F1 / Esc", "Close Settings (unsaved theme edits revert)"),
+            ("j/k or arrows", "Move the theme or color row and paint it"),
+            ("Enter", "Apply the highlighted theme, or edit its hex"),
             ("e", "Edit colors for the applied theme"),
-            (
-                "j/k or arrows",
-                "Move in the theme list or the color editor",
-            ),
-            ("Y / S", "Save the theme name (hex edits are overrides)"),
+            ("Y / S", "Save the theme (hex edits are overrides)"),
             ("Tab", "Toggle save target local ↔ global"),
             ("R", "Reset the color editor to the built-in palette"),
+            ("PgUp / PgDn", "Scroll this sheet"),
+            ("Wheel", "Scroll this sheet"),
         ],
         h_style,
         k_style,
@@ -197,7 +194,10 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
                 "Open the link in its default app",
             ),
             ("Ctrl+S", "Save"),
-            ("Ctrl+V", "Paste clipboard image into assets/"),
+            (
+                "Ctrl+V",
+                "Paste text at the caret, or an image into assets/",
+            ),
             ("Esc", "Back to NORMAL"),
         ],
         h_style,
@@ -231,7 +231,10 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
         &mut lines,
         "Mouse",
         &[
-            ("Wheel", "Scroll the pane or overlay under the cursor"),
+            (
+                "Wheel",
+                "Scroll the pane or the settings sheet under the cursor",
+            ),
             ("Click pane", "Focus tree, editor, or preview"),
             ("Click tree row", "Select"),
             ("Double-click", "Open a file or enter a folder"),
@@ -249,118 +252,9 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
     );
     lines.push(Line::from(Span::styled("Notes", h_style)));
     lines.push(Line::from(""));
-    let note = "Chrome follows LDNDDEV_TUI_VISUAL_STANDARD.md. Header is always 3 rows and footer 1, including zen. The tree lists one folder at a time (l enters, h returns) and reads files on disk; .dd_vault-*, .git, .gitignore, and db files are hidden. Long names keep their start and extension. External edits reload a clean buffer, or prompt Reload/Keep if dirty. Editor title shows git:clean / git:±N / git:conflict. :git commit scans for ghp_ / github_pat_ / AKIA / sk- / xai- / private keys and does not run repo hooks, fsmonitor, or repo aliases. Git refuses a vault config that rewrites remote URLs or sets a custom upload-pack or receive-pack program. Symlinks that point outside the vault are not opened. Overlapping pull conflicts write note.conflict-<ts>.md sidecars and keep the original. Ctrl+V pastes a clipboard image to assets/<note>-<ts>.png. Click/drag in the editor to place the caret or select; y on that selection copies it to the system clipboard. Drag the pane borders to resize. :daily and <Space>nd open notes/daily/YYYY-MM-DD.md. <Space><Space> is the command palette. Search matches frontmatter titles and aliases. gf / Enter follows [[wikilinks]] and local markdown links (creates a missing note after confirm). Ctrl+O / Ctrl+I walk the jump list. Reopening a vault restores the last note, caret, wrap, preview, splits, and zen/focus. AI is off until :ai on; each request asks consent. Default network provider is SpaceXAI (grok-4.6). :ai provider openrouter stores a key in ~/.config/ldnddev/ai.keys; :ai provider ollama talks to a local Ollama daemon. ```mermaid flowcharts, sequence diagrams, and pie charts draw as Unicode boxes in the preview. Narrow terminals hide the tree until <Space>e.";
+    let note = "Chrome follows LDNDDEV_TUI_VISUAL_STANDARD.md. Header is always 3 rows and footer 1, including zen. The tree lists one folder at a time (l enters, h returns) and reads files on disk; .dd_vault-*, .git, .gitignore, and db files are hidden. Long names keep their start and extension. External edits reload a clean buffer, or prompt Reload/Keep if dirty. Editor title shows git:clean / git:±N / git:conflict. :git commit scans for ghp_ / github_pat_ / AKIA / sk- / xai- / private keys and does not run repo hooks, fsmonitor, or repo aliases. Git refuses a vault config that rewrites remote URLs or sets a custom upload-pack or receive-pack program. Symlinks that point outside the vault are not opened. Overlapping pull conflicts write note.conflict-<ts>.md sidecars and keep the original. Pasting inserts clipboard text at the caret in one step. Ctrl+V does that, and writes a clipboard image to assets/<note>-<ts>.png when the clipboard holds pixels. Click/drag in the editor to place the caret or select; y on that selection copies it to the system clipboard. Drag the pane borders to resize. :daily and <Space>nd open notes/daily/YYYY-MM-DD.md. <Space><Space> is the command palette. Search matches frontmatter titles and aliases. gf / Enter follows [[wikilinks]] and local markdown links (creates a missing note after confirm). Ctrl+O / Ctrl+I walk the jump list. Reopening a vault restores the last note, caret, wrap, preview, splits, and zen/focus. AI is off until :ai on; each request asks consent. Default network provider is SpaceXAI (grok-4.6). :ai provider openrouter stores a key in ~/.config/ldnddev/ai.keys; :ai provider ollama talks to a local Ollama daemon. ```mermaid flowcharts, sequence diagrams, and pie charts draw as Unicode boxes in the preview. Narrow terminals hide the tree until <Space>e.";
     for chunk in wrap_to_lines(note, width.saturating_sub(2)) {
         lines.push(Line::from(Span::raw(format!("  {chunk}"))));
     }
     Text::from(lines)
-}
-
-pub fn build_theme_text(theme: &AppTheme, status: &Option<String>, width: usize) -> Text<'static> {
-    let h_style = Style::default()
-        .fg(theme.modal_header)
-        .add_modifier(Modifier::BOLD);
-    let k_style = Style::default().fg(theme.text_active_focus);
-    let div_style = Style::default().fg(theme.text_secondary);
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled("Theme", h_style)));
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  App: ", k_style),
-        Span::raw(format!("dd_vault v{}", env!("CARGO_PKG_VERSION"))),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  Source: ", k_style),
-        Span::raw(format!(
-            "{}   (./dd_vault_theme.yml or ~/.config/ldnddev/)",
-            theme.source.label()
-        )),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  Schema: ", k_style),
-        Span::raw(format!("version {}", theme.version)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  Status: ", k_style),
-        Span::raw(
-            status
-                .clone()
-                .unwrap_or_else(|| "OK (loaded cleanly)".to_string()),
-        ),
-    ]));
-    lines.push(Line::from(""));
-    let rule = "─".repeat(width.saturating_sub(4).clamp(12, 50));
-    lines.push(Line::from(Span::styled(format!("  {rule}"), div_style)));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Loaded color tokens (sampled)",
-        h_style,
-    )));
-    lines.push(Line::from(""));
-
-    let tokens: [(&str, Color, &str); 28] = [
-        ("base_background", theme.base_background, "app_shell base"),
-        ("body_background", theme.body_background, "body panes"),
-        (
-            "modal_background",
-            theme.modal_background,
-            "modals & toasts",
-        ),
-        ("text_primary", theme.text_primary, "primary text"),
-        ("text_secondary", theme.text_secondary, "muted text"),
-        ("text_disabled", theme.text_disabled, "disabled text"),
-        ("text_inverse", theme.text_inverse, "inverted text"),
-        ("text_labels", theme.text_labels, "labels at rest"),
-        ("text_active_focus", theme.text_active_focus, "focus + keys"),
-        ("modal_labels", theme.modal_labels, "modal labels"),
-        ("modal_header", theme.modal_header, "section titles bold"),
-        (
-            "selected_background",
-            theme.selected_background,
-            "selected row",
-        ),
-        ("border_default", theme.border_default, "idle pane border"),
-        ("border_active", theme.border_active, "focused pane border"),
-        (
-            "input_border_default",
-            theme.input_border_default,
-            "idle inputs",
-        ),
-        (
-            "input_border_focus",
-            theme.input_border_focus,
-            "focused inputs",
-        ),
-        (
-            "input_text_default",
-            theme.input_text_default,
-            "idle input text",
-        ),
-        (
-            "input_text_focus",
-            theme.input_text_focus,
-            "focused input text",
-        ),
-        ("cursor", theme.cursor, "input cursor overlay"),
-        ("success", theme.success, "success toasts"),
-        ("warning", theme.warning, "warning toasts"),
-        ("error", theme.error, "error toasts"),
-        ("info", theme.info, "info toasts"),
-        ("folders", theme.folders, "tree folders"),
-        ("files", theme.files, "tree files"),
-        ("links", theme.links, "wikilinks / symlinks"),
-        ("scrollbar", theme.scrollbar, "scrollbars"),
-        ("scrollbar_hover", theme.scrollbar_hover, "scrollbar thumb"),
-    ];
-    for (name, color, role) in tokens {
-        lines.push(Line::from(Span::raw(format!(
-            "  {name:<22} {}   ({role})",
-            color_to_hex(color)
-        ))));
-    }
-    Text::from(lines)
-}
-
-pub fn count_wrapped_lines(text: &Text) -> usize {
-    text.lines.len()
 }

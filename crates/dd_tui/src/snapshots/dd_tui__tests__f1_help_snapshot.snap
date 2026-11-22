@@ -4,25 +4,25 @@ expression: text
 ---
 ┌ dd_vault ────────────────────────────────────────────────────────────────────────────── no vault ┐
 │Files on disk. Opinions in git.                                                                   │
-└─────────┌Key & Mouse bindings (F1 / Esc to close, j/k or arrows to scroll)─────────────┐─────────┘
-┌ vault ──│Global                                                                        │─────────┐
-│<Space>vv│                                                                              │         │
-│to open a│  • F1                Open/close this help                                    │         │
-│         │  • F2                Omarchy themes (Enter apply, e edit, s save)            │         │
-│         │  • Ctrl+Q            Quit                                                    │         │
-│         │  • Tab               Focus tree → editor → preview                           │         │
-│         │  • gf / Enter        Follow [[wikilink]] or local markdown link under the    │         │
-│         │                      caret                                                   │         │
-│         │  • Ctrl+O / Ctrl+I   Jump list back / forward                                │         │
-│         │  • <Space>p          Toggle markdown preview                                 │         │
-│         │  • <Space>P          Read the preview full-screen                            │         │
-│         │  • <Space>ff         File finder                                             │─────────┘
-│         │  • <Space>sg         Content search (FTS)                                    │─────────┐
-│         │  • <Space>tg         Tag search                                              │         │
-│         │  • <Space>vv         Vault picker from any pane (d removes from the list)    │         │
-│         │  • <Space>nd         Open today's daily note                                 │         │
-│         │  • <Space><Space>    Command palette                                         │         │
-│         │  • <Space>ai         Cycle AI card (collapsed / chat / full)                 │ok-4.6 ─┐│
-│         └──────────────────────────────────────────────────────────────────────────────┘ai      ││
-└───────────────────────┘└───────────────────────────────────────────────────└────────────────────┘┘
-F1: Help  Esc: Close  Ctrl+Q: Quit
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ vault ────────────────┐┌ (no note) — NORMAL ────┌ Settings ──────────────────────────────────────┐
+│<Space>vv              ││open a note from the tre│j/k move   y save global   Tab target   R reset │
+│to open a vault        ││                        │Hex: #0F1114   Enter edit                       │
+│                       ││                        │                                                │
+│                       ││                        │┌ Surfaces ────────────────────────────────────┐│
+│                       ││                        ││> base_background        #0F1114              ││
+│                       ││                        ││  body_background        #2A2D31              ││
+│                       ││                        ││  modal_background       #1C1E21              ││
+│                       ││                        ││  selected_background    #0F1114              ││
+│                       ││                        │└──────────────────────────────────────────────┘│
+│                       ││                        │                                                │
+│                       │└────────────────────────│┌ Text ────────────────────────────────────────┐│
+│                       │┌ preview ───────────────││  text_primary           #F5F6F7              ││
+│                       ││open a note to preview  ││  text_secondary         #9EA3AA              ││
+│                       ││                        ││  text_labels            #FFAF46              ││
+│                       ││                        ││  text_active_focus      #64B4F5              ││
+│                       ││                        ││  modal_labels           #64B4F5              ││
+│                       ││                        ││  modal_text             #F5F6F7              ││
+│                       ││                        │└──────────────────────────────────────────────┘│
+└───────────────────────┘└────────────────────────└────────────────────────────────────────────────┘
+F1: Settings  Esc: Close  Ctrl+Q: Quit

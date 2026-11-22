@@ -22,8 +22,8 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     },
     PaletteItem {
         id: "theme",
-        label: "Theme editor",
-        keys: "F2",
+        label: "Settings",
+        keys: "F1",
     },
     PaletteItem {
         id: "preview",
@@ -221,10 +221,7 @@ impl App {
         match item.id {
             "save" => self.save_note(),
             "quit" => self.request_quit(false),
-            "help" => {
-                self.show_help = true;
-                self.help_scroll = 0;
-            }
+            "help" => self.show_settings_help(),
             "theme" => self.open_theme_ui(),
             "preview" => self.toggle_preview(),
             "files" => self.open_finder(crate::app::FinderKind::Files),

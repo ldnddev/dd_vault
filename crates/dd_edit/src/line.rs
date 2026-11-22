@@ -16,10 +16,56 @@ fn byte_at(text: &str, cursor: usize) -> usize {
 }
 
 pub fn line_insert(text: &mut String, cursor: &mut usize, ch: char) {
+    line_insert_str(text, cursor, &ch.to_string());
+}
+
+/// Insert `s` at the caret. `cursor` advances by the number of characters.
+pub fn line_insert_str(text: &mut String, cursor: &mut usize, s: &str) {
+    if s.is_empty() {
+        return;
+    }
     let at = line_clamp(text, *cursor);
     let byte = byte_at(text, at);
-    text.insert(byte, ch);
-    *cursor = at + 1;
+    text.insert_str(byte, s);
+    *cursor = at + s.chars().count();
+}
+
+/// Clipboard or bracketed-paste text. Newlines stay when `multiline` is set.
+/// A carriage return becomes a newline in that case. Other controls, including
+/// Escape, are dropped so the paste cannot run as keystrokes.
+pub fn sanitize_paste(raw: &str, multiline: bool) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                if multiline {
+                    out.push('\n');
+                }
+            }
+            '\n' => {
+                if multiline {
+                    out.push('\n');
+                }
+            }
+            '\t' => out.push(if multiline { '\t' } else { ' ' }),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Hex field paste: keep `#` and hex digits, and write letters in uppercase.
+pub fn sanitize_hex_paste(raw: &str) -> String {
+    sanitize_paste(raw, false)
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit() || *c == '#')
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
 }
 
 pub fn line_backspace(text: &mut String, cursor: &mut usize) {
@@ -117,6 +163,17 @@ mod tests {
         line_end(&text, &mut cursor);
         line_delete(&mut text, &mut cursor);
         assert_eq!((text.as_str(), cursor), ("ac", 2));
+    }
+
+    #[test]
+    fn paste_keeps_newlines_and_drops_controls() {
+        assert_eq!(sanitize_paste("a\r\nb\r\u{1b}c\td", true), "a\nb\nc\td");
+        assert_eq!(sanitize_paste("a\r\nb\tc", false), "ab c");
+        assert_eq!(sanitize_hex_paste("zz #ab\ncd"), "#ABCD");
+        let mut text = "hi".to_string();
+        let mut cursor = 1;
+        line_insert_str(&mut text, &mut cursor, "XY");
+        assert_eq!((text.as_str(), cursor), ("hXYi", 3));
     }
 
     #[test]

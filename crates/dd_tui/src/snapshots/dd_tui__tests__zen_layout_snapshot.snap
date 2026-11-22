@@ -25,4 +25,4 @@ expression: text
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-F1: Help  F2: Theme  i: Insert  :w: Save  gf: Follow  Ctrl+Q: Quit
+F1: Settings  i: Insert  :w: Save  gf: Follow  Ctrl+Q: Quit

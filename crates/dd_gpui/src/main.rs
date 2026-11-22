@@ -12,6 +12,7 @@ mod keys;
 mod paste;
 mod preview;
 mod scroll;
+mod settings;
 mod shell;
 mod watch;
 

@@ -159,6 +159,27 @@ fn insert_snippet_is_one_undo() {
 }
 
 #[test]
+fn paste_text_is_one_undo_and_drops_escape() {
+    let mut e = Editor::empty();
+    e.handle(Key::Char('i'));
+    assert!(e.paste_text("ab\r\ncd\u{1b}e[["));
+    assert_eq!(e.mode, Mode::Insert);
+    assert_eq!(e.text(), "ab\ncde[[");
+    e.handle(Key::Esc);
+    e.handle(Key::Char('u'));
+    assert_eq!(e.text(), "");
+}
+
+#[test]
+fn paste_on_the_command_line_stays_one_line() {
+    let mut e = ed("x");
+    e.handle(Key::Char(':'));
+    assert!(e.paste_text("wq\nextra"));
+    assert_eq!(e.cmdline, "wqextra");
+    assert_eq!(e.text(), "x");
+}
+
+#[test]
 fn command_w_requests_save() {
     let mut e = ed("x");
     e.handle(Key::Char(':'));

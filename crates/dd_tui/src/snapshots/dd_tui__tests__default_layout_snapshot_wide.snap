@@ -25,4 +25,4 @@ expression: text
 │                       ││                                                   ┌ AI off · grok-4.6 ─┐│
 │                       ││                                                   │off  <Space>ai      ││
 └───────────────────────┘└───────────────────────────────────────────────────└────────────────────┘┘
-F1: Help  F2: Theme  <Space>vv: Open vault  Ctrl+Q: Quit
+F1: Settings  <Space>vv: Open vault  Ctrl+Q: Quit

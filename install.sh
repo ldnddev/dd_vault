@@ -2,23 +2,28 @@
 # Install dd_vault to PREFIX/bin (default: ~/.local/bin).
 #
 # From a clone:
-#   ./install.sh
-#   ./install.sh --uninstall
+#   ./install.sh                 # ask: terminal, window, or both
+#   ./install.sh --tui
+#   ./install.sh --gui
+#   ./install.sh --both
+#   ./install.sh --uninstall     # ask the same question
 #
 # One-liner (curl):
 #   curl -fsSL https://raw.githubusercontent.com/ldnddev/dd_vault/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ldnddev/dd_vault/main/install.sh | bash -s -- --both
 #   curl -fsSL https://raw.githubusercontent.com/ldnddev/dd_vault/main/install.sh | bash -s -- --uninstall
 #
 # Env:
 #   PREFIX      install prefix (default: ~/.local)
 #   BIN_DIR     override binary dir (default: $PREFIX/bin)
 #   REPO        git URL (default: https://github.com/ldnddev/dd_vault)
-#   INSTALL_GUI set to 1 to also build and install dd_vault-gui (Rust 1.92+)
+#   INSTALL_GUI set to 1 for the same result as --both
 #
-# On Linux, install writes a desktop launcher for each binary in BIN_DIR.
-# --uninstall removes the binaries and those launchers. It leaves vaults and
-# ldnddev config alone. Pass the same PREFIX, BIN_DIR, and XDG_DATA_HOME
-# you used to install.
+# On Linux, install writes a desktop launcher for each binary it installs.
+# --uninstall asks which programs to remove, then leaves vaults and ldnddev
+# config alone. Pass the same PREFIX, BIN_DIR, and XDG_DATA_HOME you used
+# to install. With no terminal to answer, install selects the terminal app
+# and uninstall removes both.
 
 set -euo pipefail
 
@@ -33,12 +38,24 @@ die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<EOF
-Usage: install.sh [--uninstall]
+Usage: install.sh [--tui | --gui | --both] [--uninstall]
 
-  ./install.sh              build and install dd_vault
-  INSTALL_GUI=1 ./install.sh
-                            also build and install dd_vault-gui
-  ./install.sh --uninstall  remove installed binaries and desktop launchers
+  ./install.sh
+      ask: terminal app, desktop window, or both
+  ./install.sh --tui
+      install dd_vault
+  ./install.sh --gui
+      install dd_vault-gui
+  ./install.sh --both
+      install both
+  ./install.sh --uninstall
+      ask which of those to remove
+  ./install.sh --uninstall --tui
+  ./install.sh --uninstall --gui
+  ./install.sh --uninstall --both
+
+With no terminal to answer, install selects the terminal app and uninstall
+removes both. INSTALL_GUI=1 is the same as --both.
 
 Env: PREFIX, BIN_DIR, REPO, INSTALL_GUI=1
 EOF
@@ -144,38 +161,109 @@ install_launchers() {
   fi
 }
 
-build_and_install() {
-  local src="$1"
+# Read 1, 2, or 3 from the terminal. stdout is tui, gui, or both.
+# $1 is the verb shown in the question. $2 is the default number.
+# Returns 1 when the terminal cannot be used. main captures stdout, and a
+# failed redirect in that capture does not abort under set -e, so every
+# /dev/tty failure has to be an explicit status.
+ask_choice() {
+  local verb=$1 default=$2 answer choice
+  while true; do
+    {
+      printf '%s which program?\n' "$verb"
+      printf '%s\n' "  1) terminal (dd_vault)"
+      printf '%s\n' "  2) desktop window (dd_vault-gui)"
+      printf '%s\n' "  3) both"
+      printf 'Choice [%s]: ' "$default"
+    } >/dev/tty 2>/dev/null || return 1
+    if ! IFS= read -r answer </dev/tty 2>/dev/null; then
+      printf '\n' >/dev/tty 2>/dev/null || true
+      answer=$default
+    fi
+    choice=$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+    case "$choice" in
+      '' ) choice=$default ;;
+    esac
+    case "$choice" in
+      1 | tui | terminal) printf '%s\n' tui; return 0 ;;
+      2 | gui | window) printf '%s\n' gui; return 0 ;;
+      3 | both) printf '%s\n' both; return 0 ;;
+      *) printf '%s\n' "Enter 1, 2, or 3." >/dev/tty 2>/dev/null || return 1 ;;
+    esac
+  done
+}
+
+# The device node is mode rw-rw-rw, so -r/-w stay true with no controlling
+# terminal. Opening it is the check that matters.
+have_tty() {
+  { : <>/dev/tty; } 2>/dev/null
+}
+
+build_tui() {
+  local src=$1
   say "Building release binary (opt-level=z, LTO)…"
   cargo build --release --locked --manifest-path "$src/Cargo.toml"
-  mkdir -p "$BIN_DIR"
   local bin="$src/target/release/dd_vault"
   [[ -x "$bin" ]] || die "build produced no binary at $bin"
   install -m755 "$bin" "$BIN_DIR/dd_vault"
   say "Installed $BIN_DIR/dd_vault"
+}
 
-  if [[ "${INSTALL_GUI:-}" == "1" ]]; then
-    say "Building dd_vault-gui (Rust ${NEED_RUST_GUI}+, release)…"
-    cargo build --release --locked --manifest-path "$src/crates/dd_gpui/Cargo.toml"
-    local gui="$src/crates/dd_gpui/target/release/dd_vault-gui"
-    if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
-      gui="${CARGO_TARGET_DIR}/release/dd_vault-gui"
-    fi
-    [[ -x "$gui" ]] || die "build produced no binary at $gui"
-    install -m755 "$gui" "$BIN_DIR/dd_vault-gui"
-    say "Installed $BIN_DIR/dd_vault-gui"
-    say "dd_vault-gui needs Vulkan (libvulkan1 and a driver) and Wayland or X11."
+build_gui() {
+  local src=$1
+  say "Building dd_vault-gui (Rust ${NEED_RUST_GUI}+, release)…"
+  cargo build --release --locked --manifest-path "$src/crates/dd_gpui/Cargo.toml"
+  local gui="$src/crates/dd_gpui/target/release/dd_vault-gui"
+  if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+    gui="${CARGO_TARGET_DIR}/release/dd_vault-gui"
   fi
+  [[ -x "$gui" ]] || die "build produced no binary at $gui"
+  install -m755 "$gui" "$BIN_DIR/dd_vault-gui"
+  say "Installed $BIN_DIR/dd_vault-gui"
+  say "dd_vault-gui needs Vulkan (libvulkan1 and a driver) and Wayland or X11."
+}
+
+build_and_install() {
+  local src=$1 target=$2
+  mkdir -p "$BIN_DIR"
+  case "$target" in
+    tui) build_tui "$src" ;;
+    gui) build_gui "$src" ;;
+    both)
+      build_tui "$src"
+      build_gui "$src"
+      ;;
+    *) die "internal: unknown target '$target'" ;;
+  esac
 }
 
 uninstall() {
+  local target=$1
   local removed=0 path
-  local -a paths=(
-    "$BIN_DIR/dd_vault"
-    "$BIN_DIR/dd_vault-gui"
-    "$(apps_dir)/dd_vault.desktop"
-    "$(apps_dir)/dd_vault-gui.desktop"
-  )
+  local -a paths=()
+  case "$target" in
+    tui)
+      paths=(
+        "$BIN_DIR/dd_vault"
+        "$(apps_dir)/dd_vault.desktop"
+      )
+      ;;
+    gui)
+      paths=(
+        "$BIN_DIR/dd_vault-gui"
+        "$(apps_dir)/dd_vault-gui.desktop"
+      )
+      ;;
+    both)
+      paths=(
+        "$BIN_DIR/dd_vault"
+        "$BIN_DIR/dd_vault-gui"
+        "$(apps_dir)/dd_vault.desktop"
+        "$(apps_dir)/dd_vault-gui.desktop"
+      )
+      ;;
+    *) die "internal: unknown target '$target'" ;;
+  esac
   for path in "${paths[@]}"; do
     if [[ -e "$path" || -L "$path" ]]; then
       rm -f -- "$path"
@@ -184,25 +272,58 @@ uninstall() {
     fi
   done
   if [[ "$removed" -eq 0 ]]; then
-    say "No dd_vault binaries or launchers found."
+    say "No matching binaries or launchers found."
   fi
   say "Vaults and ldnddev config were left in place."
 }
 
+choose_target() {
+  local action=$1 explicit=$2
+  if [[ -n "$explicit" ]]; then
+    printf '%s\n' "$explicit"
+    return 0
+  fi
+  if have_tty; then
+    if [[ "$action" == uninstall ]]; then
+      ask_choice "Remove" 3 && return 0
+    else
+      ask_choice "Install" 1 && return 0
+    fi
+  fi
+  # say writes to stdout, and the caller captures this function.
+  if [[ "$action" == uninstall ]]; then
+    say "No terminal for a prompt. Removing both programs." >&2
+    printf '%s\n' both
+  else
+    say "No terminal for a prompt. Installing the terminal app." >&2
+    printf '%s\n' tui
+  fi
+}
+
 main() {
   local action=install
-  case "${1:-}" in
-    "") ;;
-    --uninstall | uninstall) action=uninstall ;;
-    -h | --help | help) usage; exit 0 ;;
-    *) die "unknown argument '$1' (try --help)" ;;
-  esac
-  if [[ $# -gt 1 ]]; then
-    die "unexpected argument '$2'"
+  local target=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --tui | --gui | --both)
+        if [[ -n "$target" ]]; then
+          die "pass only one of --tui, --gui, or --both"
+        fi
+        target=${1#--}
+        ;;
+      --uninstall | uninstall) action=uninstall ;;
+      -h | --help | help) usage; exit 0 ;;
+      *) die "unknown argument '$1' (try --help)" ;;
+    esac
+    shift
+  done
+  if [[ -z "$target" && "${INSTALL_GUI:-}" == "1" ]]; then
+    target=both
   fi
+  target=$(choose_target "$action" "$target")
 
   if [[ "$action" == uninstall ]]; then
-    uninstall
+    uninstall "$target"
     return 0
   fi
 
@@ -229,18 +350,25 @@ main() {
     src="$tmp/dd_vault"
   fi
 
-  build_and_install "$src"
+  build_and_install "$src" "$target"
   install_launchers
 
-  if ! command -v dd_vault >/dev/null 2>&1; then
+  if { [[ "$target" != gui ]] && ! command -v dd_vault >/dev/null 2>&1; } \
+    || { [[ "$target" != tui ]] && ! command -v dd_vault-gui >/dev/null 2>&1; }; then
     say "Add to PATH: export PATH=\"$BIN_DIR:\$PATH\""
   fi
-  say "Rust $NEED_RUST+ required for dd_vault. Optional: git (sync), XAI_API_KEY (SpaceXAI)."
-  if [[ ! -x "$BIN_DIR/dd_vault-gui" ]]; then
-    say "dd_vault-gui needs Rust $NEED_RUST_GUI+, Vulkan, and Wayland or X11. Set INSTALL_GUI=1 to build it. The default install does not."
+  if [[ "$target" != gui ]]; then
+    say "Rust $NEED_RUST+ required for dd_vault. Optional: git (sync), XAI_API_KEY (SpaceXAI)."
   fi
-  say "To remove the binaries and launchers, run this script again with --uninstall."
-  say "Done. Try: dd_vault --help"
+  if [[ "$target" != tui ]]; then
+    say "Rust $NEED_RUST_GUI+ required for dd_vault-gui, plus Vulkan and Wayland or X11."
+  fi
+  say "To remove what you installed, run this script again with --uninstall."
+  case "$target" in
+    tui) say "Done. Try: dd_vault --help" ;;
+    gui) say "Done. Try: dd_vault-gui --help" ;;
+    both) say "Done. Try: dd_vault --help    or    dd_vault-gui --help" ;;
+  esac
 }
 
 # `curl | bash` reads this file from stdin. BASH_SOURCE is unset then, and

@@ -7,8 +7,8 @@ use crossterm::event::{
 };
 
 use dd_edit::{
-    line_backspace, line_click, line_delete, line_end, line_home, line_insert, line_left,
-    line_right, Key as EditKey, Mode,
+    line_backspace, line_click, line_delete, line_end, line_home, line_insert, line_insert_str,
+    line_left, line_right, sanitize_hex_paste, sanitize_paste, Key as EditKey, Mode,
 };
 
 use crate::app::{
@@ -191,7 +191,32 @@ impl ViewTick {
     }
 }
 
+fn is_clipboard_paste(k: &KeyEvent) -> bool {
+    k.kind == KeyEventKind::Press
+        && k.code == KeyCode::Char('v')
+        && k.modifiers.contains(KeyModifiers::CONTROL)
+        && !k.modifiers.contains(KeyModifiers::ALT)
+        && !k.modifiers.contains(KeyModifiers::SHIFT)
+}
+
 fn dispatch_event(app: &mut App, evt: Event) -> Result<()> {
+    match &evt {
+        Event::Paste(text) => {
+            app.paste_text(text);
+            return Ok(());
+        }
+        Event::Key(k) if is_clipboard_paste(k) => {
+            let allow_image = !app.show_help && !app.show_theme && app.modal.is_none();
+            if allow_image && app.try_paste_clipboard_image() {
+                return Ok(());
+            }
+            if let Some(text) = crate::images::clipboard_text() {
+                app.paste_text(&text);
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
     if app.show_help {
         return handle_help(app, evt);
     }
@@ -247,8 +272,12 @@ fn handle_help(app: &mut App, evt: Event) -> Result<()> {
 fn handle_theme(app: &mut App, evt: Event) -> Result<()> {
     match evt {
         Event::Key(k) => {
-            if k.code == KeyCode::F(2) {
+            if k.code == KeyCode::F(1) {
                 close_theme(app, true);
+            } else if k.code == KeyCode::PageDown {
+                scroll_settings(app, 10);
+            } else if k.code == KeyCode::PageUp {
+                scroll_settings(app, -10);
             } else if let Some(ek) = map_editor_key(k) {
                 let shift = k.modifiers.contains(KeyModifiers::SHIFT);
                 if app.theme_editor.is_some() {
@@ -259,8 +288,8 @@ fn handle_theme(app: &mut App, evt: Event) -> Result<()> {
             }
         }
         Event::Mouse(m) => match m.kind {
-            MouseEventKind::ScrollUp => scroll_theme(app, -1),
-            MouseEventKind::ScrollDown => scroll_theme(app, 1),
+            MouseEventKind::ScrollUp => scroll_settings(app, -3),
+            MouseEventKind::ScrollDown => scroll_settings(app, 3),
             MouseEventKind::Down(MouseButton::Left) => place_hex_click(app, m.column, m.row),
             _ => {}
         },
@@ -280,8 +309,7 @@ fn handle_modal(app: &mut App, evt: Event) -> Result<()> {
         return Ok(());
     };
     if k.code == KeyCode::F(1) {
-        app.show_help = true;
-        app.help_scroll = 0;
+        app.show_settings_help();
         return Ok(());
     }
     if matches!(app.modal, Some(Modal::VaultPicker { .. })) {
@@ -427,6 +455,105 @@ fn handle_confirm_key(app: &mut App, k: KeyEvent) {
     }
 }
 
+enum ModalPaste {
+    Prompt,
+    Finder,
+    Palette,
+    Ignore,
+}
+
+impl App {
+    /// Insert a bracketed paste or clipboard block at the focused caret.
+    /// One call, one undo step in the note. Controls other than newline and
+    /// tab are already stripped by `dd_edit`.
+    pub fn paste_text(&mut self, raw: &str) {
+        if self.show_help {
+            return;
+        }
+        if self.show_theme {
+            self.paste_theme_text(raw);
+            return;
+        }
+        if self.modal.is_some() {
+            self.paste_modal_text(raw);
+            return;
+        }
+        let typing = self.pane == Pane::Editor
+            && matches!(
+                self.editor.mode,
+                Mode::Insert | Mode::Command | Mode::Search
+            );
+        if typing {
+            if self.editor.paste_text(raw) {
+                self.leader = Leader::None;
+            }
+            return;
+        }
+        if self.tree.filtering {
+            let text = sanitize_paste(raw, false);
+            if text.is_empty() {
+                return;
+            }
+            line_insert_str(&mut self.tree.filter, &mut self.tree.filter_cursor, &text);
+            self.tree.selected = 0;
+            self.leader = Leader::None;
+            return;
+        }
+        if self.ai.expanded() && !self.preview_read && self.ai.rx.is_none() {
+            let text = sanitize_paste(raw, false);
+            if text.is_empty() {
+                return;
+            }
+            line_insert_str(&mut self.ai.draft, &mut self.ai.draft_cursor, &text);
+            self.leader = Leader::None;
+            return;
+        }
+        if self.pane == Pane::Editor && !self.preview_read && self.editor.paste_text(raw) {
+            self.leader = Leader::None;
+        }
+    }
+
+    fn paste_theme_text(&mut self, raw: &str) {
+        let Some(editor) = self.theme_editor.as_mut() else {
+            return;
+        };
+        if !editor.editing_hex {
+            return;
+        }
+        let text = sanitize_hex_paste(raw);
+        if text.is_empty() {
+            return;
+        }
+        line_insert_str(&mut editor.hex_draft, &mut editor.hex_cursor, &text);
+    }
+
+    fn paste_modal_text(&mut self, raw: &str) {
+        let text = sanitize_paste(raw, false);
+        let which = match &mut self.modal {
+            Some(Modal::Prompt { draft, cursor, .. }) if !text.is_empty() => {
+                line_insert_str(draft, cursor, &text);
+                ModalPaste::Prompt
+            }
+            Some(Modal::Finder { query, cursor, .. }) if !text.is_empty() => {
+                line_insert_str(query, cursor, &text);
+                ModalPaste::Finder
+            }
+            Some(Modal::Palette { query, cursor, .. }) if !text.is_empty() => {
+                line_insert_str(query, cursor, &text);
+                ModalPaste::Palette
+            }
+            Some(_) => ModalPaste::Ignore,
+            None => return,
+        };
+        self.leader = Leader::None;
+        match which {
+            ModalPaste::Finder => self.refresh_finder(),
+            ModalPaste::Palette => self.refresh_palette(),
+            ModalPaste::Prompt | ModalPaste::Ignore => {}
+        }
+    }
+}
+
 fn move_picker(app: &mut App, delta: i32) {
     let Some(Modal::VaultPicker { selected }) = &mut app.modal else {
         return;
@@ -449,12 +576,6 @@ fn handle_key(app: &mut App, k: KeyEvent) -> Result<()> {
         app.save_note();
         return Ok(());
     }
-    if k.code == KeyCode::Char('v')
-        && k.modifiers.contains(KeyModifiers::CONTROL)
-        && app.try_paste_clipboard_image()
-    {
-        return Ok(());
-    }
     if k.code == KeyCode::Enter && k.modifiers.contains(KeyModifiers::CONTROL) {
         app.leader = Leader::None;
         if app.pane == Pane::Preview || app.preview_read {
@@ -466,11 +587,6 @@ fn handle_key(app: &mut App, k: KeyEvent) -> Result<()> {
     }
     if k.code == KeyCode::F(1) {
         app.leader = Leader::None;
-        app.show_help = true;
-        app.help_scroll = 0;
-        return Ok(());
-    }
-    if k.code == KeyCode::F(2) {
         app.open_theme_ui();
         return Ok(());
     }
@@ -911,15 +1027,45 @@ impl App {
     }
 }
 
-fn scroll_theme(app: &mut App, delta: i32) {
-    if let Some(editor) = app.theme_editor.as_mut() {
-        let next = editor.selected as i32 + delta;
-        editor.select(next.max(0) as usize);
-        return;
+fn scroll_settings(app: &mut App, delta: i32) {
+    app.settings_follow = false;
+    if delta < 0 {
+        app.help_scroll = app.help_scroll.saturating_sub(delta.unsigned_abs() as u16);
+    } else {
+        app.help_scroll = app
+            .help_scroll
+            .saturating_add(delta as u16)
+            .min(app.help_scroll_max);
     }
-    if let Some(picker) = app.theme_picker.as_mut() {
-        let next = picker.selected as i32 + delta;
-        picker.select(next.max(0) as usize);
+}
+
+fn theme_motion(key: ldnddev_theme::EditorKey) -> bool {
+    matches!(
+        key,
+        ldnddev_theme::EditorKey::Down
+            | ldnddev_theme::EditorKey::Up
+            | ldnddev_theme::EditorKey::Char('j')
+            | ldnddev_theme::EditorKey::Char('k')
+            | ldnddev_theme::EditorKey::Char('g')
+            | ldnddev_theme::EditorKey::Char('G')
+    )
+}
+
+fn preview_theme_row(app: &mut App) {
+    let outcome = {
+        let Some(picker) = app.theme_picker.as_mut() else {
+            return;
+        };
+        picker.preview_selected()
+    };
+    match outcome {
+        ldnddev_theme::PickerOutcome::Applied => {
+            if let Some(picker) = &app.theme_picker {
+                apply_palette(&mut app.theme, &picker.palette);
+            }
+        }
+        ldnddev_theme::PickerOutcome::Error(msg) => app.push_toast(ToastLevel::Error, msg),
+        _ => {}
     }
 }
 
@@ -958,7 +1104,12 @@ fn dispatch_theme_picker(app: &mut App, ek: ldnddev_theme::EditorKey) {
             app.push_toast(ToastLevel::Error, msg);
         }
         ldnddev_theme::PickerOutcome::Closed { .. } => close_theme(app, true),
-        ldnddev_theme::PickerOutcome::None => {}
+        ldnddev_theme::PickerOutcome::None => {
+            if theme_motion(ek) {
+                preview_theme_row(app);
+                app.settings_follow = true;
+            }
+        }
     }
 }
 
@@ -1050,7 +1201,15 @@ fn dispatch_theme_editor(app: &mut App, ek: ldnddev_theme::EditorKey, shift: boo
         ldnddev_theme::EditorOutcome::HexError(msg) => {
             app.push_toast(ToastLevel::Error, msg);
         }
-        ldnddev_theme::EditorOutcome::None => {}
+        ldnddev_theme::EditorOutcome::None => {
+            let editing = app
+                .theme_editor
+                .as_ref()
+                .is_some_and(|editor| editor.editing_hex);
+            if theme_motion(ek) && !editing {
+                app.settings_follow = true;
+            }
+        }
     }
 }
 
@@ -1067,6 +1226,10 @@ fn close_theme(app: &mut App, revert: bool) {
     app.theme_picker = None;
     app.theme_editor = None;
     app.show_theme = false;
+    app.show_help = false;
+    app.settings_jump_help = false;
+    app.settings_follow = false;
+    app.help_scroll = 0;
 }
 
 fn map_editor_key(k: KeyEvent) -> Option<ldnddev_theme::EditorKey> {

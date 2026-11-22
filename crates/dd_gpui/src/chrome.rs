@@ -164,17 +164,17 @@ pub fn footer_line(cols: u16, kind: FooterKind<'_>) -> String {
     }
     if matches!(kind, FooterKind::Help) {
         return if cols < 80 {
-            "F1:Help  Esc:Close  ^Q:Quit".to_string()
+            "F1:Settings  Esc:Close  ^Q:Quit".to_string()
         } else {
-            "F1: Help  Esc: Close  Ctrl+Q: Quit".to_string()
+            "F1: Settings  Esc: Close  Ctrl+Q: Quit".to_string()
         };
     }
-    let (f1, f2, quit) = if cols < 80 {
-        ("F1:Help", "F2:Theme", "^Q:Quit")
+    let (f1, quit) = if cols < 80 {
+        ("F1:Settings", "^Q:Quit")
     } else {
-        ("F1: Help", "F2: Theme", "Ctrl+Q: Quit")
+        ("F1: Settings", "Ctrl+Q: Quit")
     };
-    let left = [f1, f2];
+    let left = [f1];
     match kind {
         FooterKind::Leader(middle, cancel) => fit_footer(cols, &left, middle, &[cancel]),
         FooterKind::Ai { streaming: true } => fit_footer(cols, &left, &["Esc: Cancel"], &[quit]),
@@ -259,7 +259,7 @@ fn fit_footer(width: u16, left: &[&str], middle: &[&str], right: &[&str]) -> Str
     }
 }
 
-const NOTES: &str = "Chrome follows LDNDDEV_TUI_VISUAL_STANDARD.md. Header is always 3 rows and footer 1, including zen. The tree lists one folder at a time (l enters, h returns) and reads files on disk; .dd_vault-*, .git, .gitignore, and db files are hidden. Long names keep their start and extension. External edits reload a clean buffer, or prompt Reload/Keep if dirty. Editor title shows git:clean / git:±N / git:conflict. :git commit scans for ghp_ / github_pat_ / AKIA / sk- / xai- / private keys and does not run repo hooks, fsmonitor, or repo aliases. Git refuses a vault config that rewrites remote URLs or sets a custom upload-pack or receive-pack program. Symlinks that point outside the vault are not opened. Overlapping pull conflicts write note.conflict-<ts>.md sidecars and keep the original. Ctrl+V pastes a clipboard image to assets/<note>-<ts>.png. Click/drag in the editor to place the caret or select; y on that selection copies it to the system clipboard. Drag the pane borders to resize. :daily and <Space>nd open notes/daily/YYYY-MM-DD.md. <Space><Space> is the command palette. Search matches frontmatter titles and aliases. gf / Enter follows [[wikilinks]] and local markdown links (creates a missing note after confirm). Ctrl+O / Ctrl+I walk the jump list. Reopening a vault restores the last note, caret, wrap, preview, splits, and zen/focus. AI is off until :ai on; each request asks consent. Default network provider is SpaceXAI (grok-4.6). :ai provider openrouter stores a key in ~/.config/ldnddev/ai.keys; :ai provider ollama talks to a local Ollama daemon. ```mermaid flowcharts, sequence diagrams, and pie charts draw as Unicode boxes in the preview. Narrow terminals hide the tree until <Space>e. The preview sets heading sizes, emphasis, and code in their own faces. F2 opens an appearance sheet beside the vault: the highlighted theme paints immediately, and the editor and preview faces come from the fonts installed on this machine. Scrollbars on the tree, notes, and preview follow the wheel and the keys. This is the desktop window (dd_vault-gui), not the terminal.";
+const NOTES: &str = "Chrome follows LDNDDEV_TUI_VISUAL_STANDARD.md. Header is always 3 rows and footer 1, including zen. The tree lists one folder at a time (l enters, h returns) and reads files on disk; .dd_vault-*, .git, .gitignore, and db files are hidden. Long names keep their start and extension. External edits reload a clean buffer, or prompt Reload/Keep if dirty. Editor title shows git:clean / git:±N / git:conflict. :git commit scans for ghp_ / github_pat_ / AKIA / sk- / xai- / private keys and does not run repo hooks, fsmonitor, or repo aliases. Git refuses a vault config that rewrites remote URLs or sets a custom upload-pack or receive-pack program. Symlinks that point outside the vault are not opened. Overlapping pull conflicts write note.conflict-<ts>.md sidecars and keep the original. Pasting inserts clipboard text at the caret in one step. Ctrl+V does that, and writes a clipboard image to assets/<note>-<ts>.png when the clipboard holds pixels. Click/drag in the editor to place the caret or select; y on that selection copies it to the system clipboard. Drag the pane borders to resize. :daily and <Space>nd open notes/daily/YYYY-MM-DD.md. <Space><Space> is the command palette. Search matches frontmatter titles and aliases. gf / Enter follows [[wikilinks]] and local markdown links (creates a missing note after confirm). Ctrl+O / Ctrl+I walk the jump list. Reopening a vault restores the last note, caret, wrap, preview, splits, and zen/focus. AI is off until :ai on; each request asks consent. Default network provider is SpaceXAI (grok-4.6). :ai provider openrouter stores a key in ~/.config/ldnddev/ai.keys; :ai provider ollama talks to a local Ollama daemon. ```mermaid flowcharts, sequence diagrams, and pie charts draw as Unicode boxes in the preview. Narrow terminals hide the tree until <Space>e. The preview sets heading sizes, emphasis, and code in their own faces. F1 opens Settings beside the vault. The sheet lists themes, fonts, colors, editor, window, AI, the keymap, and this help, and it scrolls. A highlighted theme or font paints immediately. Editor, Window, and AI rows save the same files the commands already write. Scrollbars on the tree, notes, and preview follow the wheel and the keys. This is the desktop window (dd_vault-gui), not the terminal.";
 
 pub fn help_lines() -> Vec<String> {
     let mut lines = Vec::new();
@@ -267,10 +267,9 @@ pub fn help_lines() -> Vec<String> {
         &mut lines,
         "Global",
         &[
-            ("F1", "Open/close this help"),
             (
-                "F2",
-                "Appearance sheet beside the vault (j/k paints the theme, f switches fonts)",
+                "F1",
+                "Open/close Settings (themes, fonts, editor, window, AI, keymap, and this help)",
             ),
             ("Ctrl+Q", "Quit"),
             ("Tab", "Focus tree → editor → preview"),
@@ -308,24 +307,27 @@ pub fn help_lines() -> Vec<String> {
     );
     add_section(
         &mut lines,
-        "Help / Appearance",
+        "Settings",
         &[
-            ("F1 / Esc", "Close help"),
             (
-                "F2 / Esc",
+                "F1 / Esc",
                 "Close the sheet (reverts an unsaved theme and unsaved fonts)",
             ),
             (
-                "j/k or arrows",
-                "Highlight a theme or font and paint it immediately",
+                "j/k, arrows, or click",
+                "Move. A theme or font paints immediately. The row is the click target.",
             ),
-            ("Enter", "Keep the highlighted font in the GUI config"),
+            (
+                "Enter",
+                "Keep the highlighted font, or run the highlighted option",
+            ),
             ("e", "Edit colors for the applied theme"),
             (
                 "f",
                 "Editor font, preview font, then back to the theme list",
             ),
-            ("/", "Filter the font list"),
+            ("/", "Search settings, or filter an open font list"),
+            ("[ / ]", "Jump to the previous or next section"),
             (
                 "Y / S",
                 "Save the theme file and any GUI font change (hex edits are overrides)",
@@ -377,7 +379,10 @@ pub fn help_lines() -> Vec<String> {
                 "Open the link in its default app",
             ),
             ("Ctrl+S", "Save"),
-            ("Ctrl+V", "Paste clipboard image into assets/"),
+            (
+                "Ctrl+V",
+                "Paste text at the caret, or an image into assets/",
+            ),
             ("Esc", "Back to NORMAL"),
         ],
     );
@@ -498,7 +503,8 @@ mod tests {
         assert!(text.contains("Narrow terminals hide the tree"));
         assert!(text.contains("desktop window (dd_vault-gui), not the terminal"));
         assert!(text.contains("F1"));
-        assert!(text.contains("F2"));
+        assert!(text.contains("Open/close Settings"));
+        assert!(!text.contains("F2"));
         assert!(text.contains("<Space>h"));
         assert!(text.contains("<Space>z"));
         assert!(text.contains("<Space>e"));
@@ -550,28 +556,28 @@ mod tests {
     #[test]
     fn footer_pins_f1_and_drops_context_from_the_right() {
         let wide = footer_line(120, FooterKind::Editor(EditMode::Normal));
-        assert!(wide.contains("F1: Help"));
-        assert!(wide.contains("F2: Theme"));
+        assert!(wide.contains("F1: Settings"));
+        assert!(!wide.contains("F2"));
         assert!(wide.contains("gf: Follow"));
         assert!(wide.contains("Ctrl+Q: Quit"));
         let narrow = footer_line(40, FooterKind::Editor(EditMode::Normal));
-        assert!(narrow.starts_with("F1:Help"));
-        assert!(narrow.contains("F2:Theme"));
+        assert!(narrow.starts_with("F1:Settings"));
+        assert!(!narrow.contains("F2"));
         assert!(narrow.contains("^Q:Quit"));
         assert!(!narrow.contains("gf: Follow"));
         assert_eq!(
             footer_line(100, FooterKind::Help),
-            "F1: Help  Esc: Close  Ctrl+Q: Quit"
+            "F1: Settings  Esc: Close  Ctrl+Q: Quit"
         );
         assert_eq!(
             footer_line(40, FooterKind::Help),
-            "F1:Help  Esc:Close  ^Q:Quit"
+            "F1:Settings  Esc:Close  ^Q:Quit"
         );
         let leader = footer_line(
             36,
             FooterKind::Leader(&["one", "two", "three", "four", "five"], "Esc cancel"),
         );
-        assert!(leader.contains("F1:Help"));
+        assert!(leader.contains("F1:Settings"));
         assert!(leader.contains("Esc cancel"));
         assert!(!leader.contains("five"));
     }

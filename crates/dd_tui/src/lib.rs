@@ -1,4 +1,4 @@
-//! Family chrome (header / body / footer / F1 / F2 / toasts) for `dd_vault`.
+//! Family chrome (header / body / footer / F1 settings / toasts) for `dd_vault`.
 
 mod ai;
 mod app;

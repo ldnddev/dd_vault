@@ -29,8 +29,8 @@ mod line;
 pub use error::Error;
 pub use keys::Key;
 pub use line::{
-    line_backspace, line_click, line_delete, line_end, line_home, line_insert, line_left, line_len,
-    line_parts, line_right,
+    line_backspace, line_click, line_delete, line_end, line_home, line_insert, line_insert_str,
+    line_left, line_len, line_parts, line_right, sanitize_hex_paste, sanitize_paste,
 };
 
 const MAX_OPEN_BYTES: u64 = 2_000_000;
@@ -1276,6 +1276,27 @@ impl Editor {
         self.follow_caret = true;
         self.snapshot();
         self.insert_str(s);
+    }
+
+    /// Drop a paste at the caret. A note keeps newlines. `:` and `/` stay one line.
+    /// Returns false when the paste had no characters left after stripping controls.
+    pub fn paste_text(&mut self, raw: &str) -> bool {
+        let multiline = !matches!(self.mode, Mode::Command | Mode::Search);
+        let text = sanitize_paste(raw, multiline);
+        if text.is_empty() {
+            return false;
+        }
+        if self.mode == Mode::Visual {
+            self.mode = Mode::Normal;
+            self.visual_anchor = None;
+            self.visual_line = false;
+        }
+        if multiline {
+            self.insert_snippet(&text);
+        } else {
+            line_insert_str(&mut self.cmdline, &mut self.cmdline_cursor, &text);
+        }
+        true
     }
 
     fn is_word(c: char) -> bool {

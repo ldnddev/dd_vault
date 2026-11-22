@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use dd_edit::{
     Action, Editor, GitOp, Mode, line_backspace, line_click, line_delete, line_end, line_home,
-    line_insert, line_left, line_parts, line_right,
+    line_insert, line_insert_str, line_left, line_parts, line_right, sanitize_hex_paste,
+    sanitize_paste,
 };
 use dd_render::encode_png_rgba;
 use dd_vault_core::{
@@ -63,6 +64,7 @@ use crate::preview::{
     yank_text,
 };
 use crate::scroll::{ScrollPort, index_at, offset_for_thumb, rows_viewport_px, thumb_geom};
+use crate::settings::{FontSlot, SettingId, SettingRow, SettingsPage};
 use crate::watch::{VaultWatch, watch_rel};
 
 const MAX_OPEN_BYTES: u64 = 2_000_000;
@@ -70,7 +72,12 @@ const MAX_OPEN_BYTES: u64 = 2_000_000;
 const FONT: f32 = 14.0;
 const LINE: f32 = 20.0;
 const CHROME: f32 = 28.0;
-const SHEET_W: f32 = 380.0;
+const OPTION_H: f32 = 52.0;
+const HEAD_H: f32 = 28.0;
+const NOTE_H: f32 = 22.0;
+const HEX_H: f32 = 40.0;
+const RULE_H: f32 = 2.0;
+const SECTION_GAP: f32 = 12.0;
 const BAR_W: f32 = 10.0;
 
 pub struct Boot {
@@ -282,6 +289,7 @@ pub struct Shell {
     tree_port: ScrollPort,
     notes_port: ScrollPort,
     preview_port: ScrollPort,
+    settings_port: ScrollPort,
     reading_follow: bool,
     git_rx: Option<mpsc::Receiver<Result<(String, GitOpResult), String>>>,
     busy_kind: Option<&'static str>,
@@ -305,6 +313,10 @@ pub struct Shell {
     line_hits: LineHits,
     hex_hit: Option<HexHit>,
     appear: AppearSection,
+    settings_query: String,
+    settings_cursor: usize,
+    settings_query_on: bool,
+    settings_selected: usize,
     measured_mono: String,
     body_cols: u16,
     tree_px: f32,
@@ -406,34 +418,121 @@ enum AppearSection {
     Sans,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum AppearAction {
     None,
     Theme(usize),
     Color(usize),
     Family(usize),
     Focus(AppearSection),
+    Setting(SettingId),
+    Search,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineKind {
+    Head,
+    Option,
+    Note,
+    Rule,
+    Gap,
+    Hex,
 }
 
 #[derive(Clone)]
 struct AppearLine {
     text: String,
+    detail: String,
+    value: String,
     caret: Option<FieldCaret>,
     hex: Option<HexSpan>,
     selected: bool,
+    dim: bool,
     action: AppearAction,
+    kind: LineKind,
 }
 
-#[derive(Clone)]
+struct DocHit {
+    action: AppearAction,
+    section: u8,
+    y: f32,
+    h: f32,
+}
+
+struct SheetDoc {
+    blocks: Vec<AppearLine>,
+    hits: Vec<DocHit>,
+    help_y: f32,
+    content_h: f32,
+}
+
+struct DocBuild {
+    blocks: Vec<AppearLine>,
+    hits: Vec<DocHit>,
+    y: f32,
+    help_y: f32,
+    framed: bool,
+}
+
+impl DocBuild {
+    fn push(&mut self, line: AppearLine, section: u8) {
+        if line.kind == LineKind::Head {
+            self.open_frame(section, &line.text);
+        }
+        self.add(line, section);
+    }
+
+    /// Close the previous box, leave a gap, and open the next one.
+    fn open_frame(&mut self, section: u8, title: &str) {
+        if self.framed {
+            self.add(rule_line(), section);
+            self.add(gap_line(), section);
+        }
+        if title == "Help" {
+            self.help_y = self.y;
+        }
+        self.add(rule_line(), section);
+        self.framed = true;
+    }
+
+    fn add(&mut self, line: AppearLine, section: u8) {
+        let h = block_h(line.kind);
+        if matches!(line.kind, LineKind::Option | LineKind::Hex)
+            && !matches!(line.action, AppearAction::None)
+        {
+            self.hits.push(DocHit {
+                action: line.action,
+                section,
+                y: self.y,
+                h,
+            });
+        }
+        self.y += h;
+        self.blocks.push(line);
+    }
+
+    fn finish(mut self) -> SheetDoc {
+        if self.framed {
+            self.add(rule_line(), 0);
+        }
+        SheetDoc {
+            blocks: self.blocks,
+            hits: self.hits,
+            help_y: self.help_y,
+            content_h: self.y.max(1.0),
+        }
+    }
+}
+
 struct AppearanceView {
     title: String,
     hint: String,
     font_query: Option<FieldText>,
     lines: Vec<AppearLine>,
-    editor_font: String,
-    preview_font: String,
-    editor_on: bool,
-    preview_on: bool,
+    content_h: f32,
+    query: FieldText,
+    query_on: bool,
+    port: ScrollHandle,
 }
 
 #[derive(Clone)]
@@ -485,6 +584,7 @@ struct LineHits {
     ai: Option<LineBox>,
     cmd: Option<LineBox>,
     font: Option<LineBox>,
+    search: Option<LineBox>,
 }
 
 #[derive(Clone, Copy)]
@@ -494,6 +594,7 @@ enum LineSlot {
     Ai,
     Cmd,
     Font,
+    Search,
 }
 
 #[derive(Clone, Copy)]
@@ -563,6 +664,7 @@ impl Shell {
             tree_port: ScrollPort::new(),
             notes_port: ScrollPort::new(),
             preview_port: ScrollPort::new(),
+            settings_port: ScrollPort::new(),
             reading_follow: false,
             git_rx: None,
             busy_kind: None,
@@ -586,6 +688,10 @@ impl Shell {
             line_hits: LineHits::default(),
             hex_hit: None,
             appear: AppearSection::Theme,
+            settings_query: String::new(),
+            settings_cursor: 0,
+            settings_query_on: false,
+            settings_selected: 0,
             measured_mono: String::new(),
             body_cols: 120,
             tree_px: 0.,
@@ -1423,17 +1529,34 @@ impl Shell {
     }
 
     fn handle_press(&mut self, press: KeyPress<'_>, cx: &mut Context<Self>) -> Effect {
+        if press.control && !press.shift && eq_key(press.key, "v") {
+            let block_image = self.help
+                || self.theme_open()
+                || self.confirm.is_some()
+                || self.overlay.is_some()
+                || self.open.is_none();
+            if !block_image && self.try_paste_image() {
+                return Effect::None;
+            }
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                self.paste_text(&text);
+            }
+            return Effect::None;
+        }
         if self.help {
             return self.handle_help_key(press);
         }
         if self.theme_open() {
+            if self.confirm.is_some() {
+                return self.handle_confirm(press);
+            }
+            if self.overlay.is_some() {
+                self.status = None;
+                return self.handle_overlay(press);
+            }
             return self.handle_theme_key(press);
         }
-        if is_fn(press, 1) {
-            self.open_help();
-            return Effect::None;
-        }
-        if is_fn(press, 2) && self.confirm.is_none() && self.overlay.is_none() {
+        if is_fn(press, 1) && self.confirm.is_none() && self.overlay.is_none() {
             self.open_theme();
             return Effect::None;
         }
@@ -1458,9 +1581,6 @@ impl Shell {
         }
         if self.open.is_none() {
             return self.handle_picker(press);
-        }
-        if press.control && eq_key(press.key, "v") && self.try_paste_image() {
-            return Effect::None;
         }
         if press.control && matches!(press.key, "enter" | "return") {
             self.leader = Leader::None;
@@ -1967,6 +2087,14 @@ impl Shell {
             self.place_overlay_cursor(caret_column(hit.bounds, pos, width, hit.prefix));
             return true;
         }
+        if let Some(hit) = self.line_hits.search
+            && point_in(hit.bounds, pos)
+        {
+            let col = caret_column(hit.bounds, pos, width, hit.prefix);
+            self.settings_cursor = line_click(&self.settings_query, col);
+            self.settings_query_on = true;
+            return true;
+        }
         if let Some(hit) = self.line_hits.font
             && point_in(hit.bounds, pos)
         {
@@ -2025,6 +2153,7 @@ impl Shell {
                 editor.editing_hex = false;
                 editor.select(index);
             }
+            self.reveal_settings_selection();
             return;
         }
         let place = self.hex_hit.and_then(|hit| {
@@ -2116,11 +2245,6 @@ impl Shell {
         }
         if self.help {
             self.scroll_help(rows);
-            cx.notify();
-            return;
-        }
-        if self.theme_open() {
-            self.scroll_theme(rows);
             cx.notify();
         }
     }
@@ -4221,6 +4345,141 @@ impl Shell {
         }
     }
 
+    /// Insert clipboard or a synthesized paste at the focused caret, in one step.
+    fn paste_text(&mut self, raw: &str) {
+        if self.help || self.confirm.is_some() {
+            return;
+        }
+        if self.theme_open() {
+            if self.overlay.is_some() {
+                self.paste_overlay_text(raw);
+                return;
+            }
+            if self.settings_query_on {
+                let text = sanitize_paste(raw, false);
+                if text.is_empty() {
+                    return;
+                }
+                line_insert_str(&mut self.settings_query, &mut self.settings_cursor, &text);
+                self.settings_selected = 0;
+                self.settings_port.push_px(0.0);
+                return;
+            }
+            self.paste_theme_text(raw);
+            return;
+        }
+        if self.overlay.is_some() {
+            self.paste_overlay_text(raw);
+            return;
+        }
+        let typing = self.open.as_ref().is_some_and(|open| {
+            !open.pane_tree
+                && !open.focus_preview
+                && matches!(
+                    open.editor.mode,
+                    Mode::Insert | Mode::Command | Mode::Search
+                )
+        });
+        if typing {
+            if self
+                .open
+                .as_mut()
+                .is_some_and(|open| open.editor.paste_text(raw))
+            {
+                self.leader = Leader::None;
+            }
+            return;
+        }
+        if self.open.as_ref().is_some_and(|open| open.tree.filtering) {
+            let text = sanitize_paste(raw, false);
+            if text.is_empty() {
+                return;
+            }
+            if let Some(open) = &mut self.open {
+                line_insert_str(&mut open.tree.filter, &mut open.tree.filter_cursor, &text);
+                open.tree.selected = 0;
+            }
+            self.leader = Leader::None;
+            return;
+        }
+        if self.ai_keys_here() && !self.ai.streaming() {
+            let text = sanitize_paste(raw, false);
+            if text.is_empty() {
+                return;
+            }
+            line_insert_str(&mut self.ai.draft, &mut self.ai.draft_cursor, &text);
+            self.leader = Leader::None;
+            return;
+        }
+        let notes = self
+            .open
+            .as_ref()
+            .is_some_and(|open| !open.pane_tree && !open.focus_preview && !open.preview_read);
+        if notes
+            && self
+                .open
+                .as_mut()
+                .is_some_and(|open| open.editor.paste_text(raw))
+        {
+            self.leader = Leader::None;
+        }
+    }
+
+    fn paste_theme_text(&mut self, raw: &str) {
+        if self.font_filter.is_some() && self.appear != AppearSection::Theme {
+            let text = sanitize_paste(raw, false);
+            if text.is_empty() {
+                return;
+            }
+            if let Some(query) = self.font_filter.as_mut() {
+                line_insert_str(query, &mut self.font_cursor, &text);
+            }
+            self.retarget_font_highlight();
+            return;
+        }
+        if !self.editing_hex() {
+            return;
+        }
+        let text = sanitize_hex_paste(raw);
+        if text.is_empty() {
+            return;
+        }
+        if let Some(editor) = self.theme_editor.as_mut() {
+            line_insert_str(&mut editor.hex_draft, &mut editor.hex_cursor, &text);
+        }
+    }
+
+    fn paste_overlay_text(&mut self, raw: &str) {
+        let text = sanitize_paste(raw, false);
+        enum Which {
+            Finder,
+            Palette,
+            Done,
+        }
+        let which = match &mut self.overlay {
+            Some(Overlay::Prompt { draft, cursor, .. }) if !text.is_empty() => {
+                line_insert_str(draft, cursor, &text);
+                Which::Done
+            }
+            Some(Overlay::Finder { query, cursor, .. }) if !text.is_empty() => {
+                line_insert_str(query, cursor, &text);
+                Which::Finder
+            }
+            Some(Overlay::Palette { query, cursor, .. }) if !text.is_empty() => {
+                line_insert_str(query, cursor, &text);
+                Which::Palette
+            }
+            Some(_) => Which::Done,
+            None => return,
+        };
+        self.leader = Leader::None;
+        match which {
+            Which::Finder => self.refresh_finder(),
+            Which::Palette => self.refresh_palette(),
+            Which::Done => {}
+        }
+    }
+
     fn try_paste_image(&mut self) -> bool {
         let editor = self.open.as_ref().is_some_and(|open| {
             !open.pane_tree
@@ -4491,12 +4750,28 @@ impl Shell {
     }
 
     fn open_help(&mut self) {
-        if self.theme_open() {
-            self.close_theme(true);
-        }
-        self.help = true;
-        self.help_scroll = 0;
+        self.help = false;
         self.leader = Leader::None;
+        if self.theme_editor.is_some()
+            && self.theme_picker.is_some()
+            && let Some(editor) = self.theme_editor.take()
+        {
+            if let Some(picker) = self.theme_picker.as_mut() {
+                picker.palette = editor.palette.clone();
+                picker.save_target = editor.save_target;
+            }
+            self.apply_live_palette(editor.palette);
+        }
+        if !self.theme_open() {
+            self.open_theme();
+        }
+        self.settings_query.clear();
+        self.settings_cursor = 0;
+        self.settings_query_on = false;
+        self.font_filter = None;
+        self.font_cursor = 0;
+        let help_y = self.sheet_doc().help_y;
+        self.settings_port.push_px(help_y);
     }
 
     fn handle_help_key(&mut self, press: KeyPress<'_>) -> Effect {
@@ -4546,6 +4821,9 @@ impl Shell {
     }
 
     fn open_theme(&mut self) {
+        if self.theme_open() {
+            return;
+        }
         self.help = false;
         self.leader = Leader::None;
         self.font_snapshot = (self.mono.clone(), self.sans.clone());
@@ -4556,44 +4834,114 @@ impl Shell {
         self.font_cursor = 0;
         self.family_selected = 0;
         self.family_scroll = 0;
+        self.reset_settings_query();
         let picker = ThemePicker::new(
             self.palette.clone(),
             extra_theme_fields(),
             self.omarchy.clone(),
         );
         if picker.lists_omarchy() {
+            self.settings_selected = picker.selected;
             self.theme_picker = Some(picker);
             self.theme_editor = None;
         } else {
             self.theme_picker = None;
             self.theme_editor = Some(ThemeEditor::new(self.palette.clone(), extra_theme_fields()));
         }
+        self.settings_port.push_px(0.0);
     }
 
     fn handle_theme_key(&mut self, press: KeyPress<'_>) -> Effect {
-        if !press.control && is_fn(press, 2) {
+        if !press.control && is_fn(press, 1) {
             self.close_theme(true);
             return Effect::None;
         }
-        if self.font_filter.is_some() && self.appear != AppearSection::Theme {
+        if self.settings_query_on {
+            return self.handle_settings_query(press);
+        }
+        if self.font_filter.is_some() && self.theme_editor.is_none() {
             return self.handle_font_filter(press);
         }
-        if self.appear != AppearSection::Theme {
-            return self.handle_font_section(press);
+        if !press.control && !self.editing_hex() {
+            let slash = press.key == "/" || press.key_char == Some("/");
+            if slash && self.appear != AppearSection::Theme && self.theme_editor.is_none() {
+                self.font_filter = Some(String::new());
+                self.font_cursor = 0;
+                self.retarget_font_highlight();
+                return Effect::None;
+            }
+            if slash {
+                self.focus_settings_query();
+                return Effect::None;
+            }
         }
-        if !press.control && press.key_char == Some("f") && !self.editing_hex() {
-            self.cycle_appear();
-            return Effect::None;
-        }
-        let Some(key) = editor_key(press.key, press.key_char, press.control) else {
-            return Effect::None;
-        };
         if self.theme_editor.is_some() {
+            let Some(key) = editor_key(press.key, press.key_char, press.control) else {
+                return Effect::None;
+            };
             self.dispatch_theme_editor(key, press.shift);
-        } else {
-            self.dispatch_theme_picker(key);
+            self.reveal_settings_selection();
+            return Effect::None;
         }
-        Effect::None
+        if !press.control {
+            if press.key == "bracketright" || press.key_char == Some("]") {
+                self.jump_section(1);
+                return Effect::None;
+            }
+            if press.key == "bracketleft" || press.key_char == Some("[") {
+                self.jump_section(-1);
+                return Effect::None;
+            }
+            if matches!(
+                press.key_char,
+                Some("y") | Some("Y") | Some("s") | Some("S")
+            ) {
+                self.request_save_theme();
+                return Effect::None;
+            }
+            if matches!(press.key_char, Some("e") | Some("E")) {
+                self.show_colors();
+                return Effect::None;
+            }
+            if press.key == "tab" {
+                self.dispatch_theme_picker(EditorKey::Tab);
+                return Effect::None;
+            }
+            if press.key_char == Some("f") {
+                self.cycle_appear();
+                if self.appear == AppearSection::Theme {
+                    let selected = self
+                        .theme_picker
+                        .as_ref()
+                        .map(|picker| picker.selected)
+                        .unwrap_or(0);
+                    self.settings_selected = selected;
+                    self.reveal_settings_selection();
+                } else {
+                    self.sync_family_selection();
+                }
+                return Effect::None;
+            }
+            if self.appear != AppearSection::Theme
+                && (matches!(press.key, "left" | "h") || press.key_char == Some("h"))
+            {
+                let section = self.appear;
+                self.font_filter = None;
+                self.font_cursor = 0;
+                self.appear = AppearSection::Theme;
+                if let Some(index) = self
+                    .sheet_doc()
+                    .hits
+                    .iter()
+                    .position(|hit| hit.action == AppearAction::Focus(section))
+                {
+                    self.settings_selected = index;
+                }
+                self.reveal_settings_selection();
+                return Effect::None;
+            }
+        }
+        self.handle_settings_list(press)
     }
 
     fn dispatch_theme_picker(&mut self, key: EditorKey) {
@@ -4697,6 +5045,7 @@ impl Shell {
         self.appear = AppearSection::Theme;
         self.font_filter = None;
         self.font_cursor = 0;
+        self.reset_settings_query();
     }
 
     fn apply_live_palette(&mut self, palette: Palette) {
@@ -4759,32 +5108,493 @@ impl Shell {
         fields
     }
 
-    fn appearance_view(&self) -> AppearanceView {
-        let rows = self.sheet_list_rows();
-        let (title, hint, lines) = if self.appear != AppearSection::Theme {
-            self.font_section_view(rows)
-        } else if let Some(editor) = &self.theme_editor {
-            (
-                "Appearance · colors".into(),
-                format!(
-                    "save {}    Tab target    y save    R reset    f fonts    Esc revert",
-                    editor.save_target.label()
-                ),
-                color_lines(editor, rows),
-            )
-        } else if let Some(picker) = &self.theme_picker {
-            (
-                "Appearance".into(),
-                format!(
-                    "j/k live    e colors    y save {}    f fonts    Esc revert",
-                    picker.save_target.label()
-                ),
-                theme_lines(picker, rows),
+    fn reset_settings_query(&mut self) {
+        self.settings_query.clear();
+        self.settings_cursor = 0;
+        self.settings_query_on = false;
+        self.settings_selected = 0;
+    }
+
+    fn nudge_setting(&mut self, delta: isize) {
+        let count = self.sheet_doc().hits.len();
+        if count == 0 {
+            return;
+        }
+        let last = count - 1;
+        let next = match delta {
+            isize::MAX => last,
+            isize::MIN => 0,
+            step => (self.settings_selected as isize + step).clamp(0, last as isize) as usize,
+        };
+        self.settings_selected = next;
+        self.land_on_selection();
+    }
+
+    fn land_on_selection(&mut self) {
+        let action = self
+            .sheet_doc()
+            .hits
+            .get(self.settings_selected)
+            .map(|hit| hit.action);
+        match action {
+            Some(AppearAction::Theme(index)) => self.pick_theme_row(index),
+            Some(AppearAction::Family(index)) => self.choose_family(index),
+            Some(AppearAction::Color(index)) => {
+                if let Some(editor) = self.theme_editor.as_mut() {
+                    editor.select(index);
+                }
+            }
+            _ => {}
+        }
+        self.reveal_settings_selection();
+    }
+
+    fn jump_section(&mut self, dir: isize) {
+        let hits = self.sheet_doc().hits;
+        if hits.is_empty() {
+            return;
+        }
+        let current = hits
+            .get(self.settings_selected)
+            .map(|hit| hit.section)
+            .unwrap_or(0);
+        let index = if dir > 0 {
+            hits.iter().position(|hit| hit.section > current)
+        } else {
+            hits.iter()
+                .rposition(|hit| hit.section < current)
+                .map(|found| {
+                    let section = hits[found].section;
+                    hits.iter()
+                        .position(|hit| hit.section == section)
+                        .unwrap_or(found)
+                })
+        };
+        let Some(index) = index else {
+            return;
+        };
+        self.settings_selected = index;
+        self.land_on_selection();
+    }
+
+    fn reveal_settings_selection(&mut self) {
+        let doc = self.sheet_doc();
+        let hit = if self.theme_editor.is_some() && self.settings_query.trim().is_empty() {
+            let selected = self.theme_editor.as_ref().map(|editor| editor.selected);
+            doc.hits.iter().find(
+                |hit| matches!(hit.action, AppearAction::Color(index) if Some(index) == selected),
             )
         } else {
-            ("Appearance".into(), String::new(), Vec::new())
+            doc.hits.get(self.settings_selected)
         };
-        let font_query = if self.appear == AppearSection::Theme {
+        let Some(hit) = hit else {
+            return;
+        };
+        let view = self.settings_port.view_px().unwrap_or(400.0);
+        let current = (-self.settings_port.handle.offset().y / px(1.)).max(0.0);
+        let bottom = hit.y + hit.h;
+        if hit.y < current {
+            self.settings_port.push_px(hit.y);
+        } else if bottom > current + view {
+            self.settings_port.push_px((bottom - view).max(0.0));
+        }
+    }
+
+    fn focus_settings_query(&mut self) {
+        self.settings_query_on = true;
+        self.settings_selected = 0;
+        self.settings_port.push_px(0.0);
+    }
+
+    fn handle_settings_query(&mut self, press: KeyPress<'_>) -> Effect {
+        if press.key == "escape" {
+            self.reset_settings_query();
+            return Effect::None;
+        }
+        if press.key == "enter" || press.key == "return" {
+            self.activate_current();
+            return Effect::None;
+        }
+        if matches!(press.key, "up" | "down") {
+            self.nudge_setting(if press.key == "up" { -1 } else { 1 });
+            return Effect::None;
+        }
+        if edit_line(
+            &mut self.settings_query,
+            &mut self.settings_cursor,
+            press,
+            false,
+        ) {
+            self.settings_selected = 0;
+            self.settings_port.push_px(0.0);
+            if self.settings_query.is_empty() {
+                self.settings_query_on = false;
+            }
+        }
+        Effect::None
+    }
+
+    fn handle_settings_list(&mut self, press: KeyPress<'_>) -> Effect {
+        if press.key == "escape" {
+            self.close_theme(true);
+            return Effect::None;
+        }
+        if press.key == "enter" || press.key == "return" {
+            self.activate_current();
+            return Effect::None;
+        }
+        if press.key == "/" || press.key_char == Some("/") {
+            self.focus_settings_query();
+            return Effect::None;
+        }
+        if matches!(press.key, "pagedown" | "page_down") {
+            self.nudge_setting(8);
+            return Effect::None;
+        }
+        if matches!(press.key, "pageup" | "page_up") {
+            self.nudge_setting(-8);
+            return Effect::None;
+        }
+        if press.key_char == Some("G") || press.key == "end" {
+            self.nudge_setting(isize::MAX);
+            return Effect::None;
+        }
+        if press.key_char == Some("g") || press.key == "home" {
+            self.nudge_setting(isize::MIN);
+            return Effect::None;
+        }
+        if matches!(press.key, "down" | "j") || press.key_char == Some("j") {
+            self.nudge_setting(1);
+            return Effect::None;
+        }
+        if matches!(press.key, "up" | "k") || press.key_char == Some("k") {
+            self.nudge_setting(-1);
+            return Effect::None;
+        }
+        Effect::None
+    }
+
+    fn need_vault(&mut self) -> bool {
+        if self.open.is_some() {
+            return true;
+        }
+        self.status = Some("Open a vault first".into());
+        false
+    }
+
+    fn show_colors(&mut self) {
+        self.font_filter = None;
+        self.font_cursor = 0;
+        self.appear = AppearSection::Theme;
+        self.settings_query.clear();
+        self.settings_cursor = 0;
+        self.settings_query_on = false;
+        if self.theme_editor.is_none() {
+            self.dispatch_theme_picker(EditorKey::Char('e'));
+        }
+        self.settings_port.push_px(0.0);
+        self.reveal_settings_selection();
+    }
+
+    fn activate_current(&mut self) {
+        let Some(action) = self
+            .sheet_doc()
+            .hits
+            .get(self.settings_selected)
+            .map(|hit| hit.action)
+        else {
+            return;
+        };
+        match action {
+            AppearAction::Theme(index) => self.pick_theme_row(index),
+            AppearAction::Family(index) => {
+                self.choose_family(index);
+                self.keep_fonts();
+            }
+            AppearAction::Focus(section) => self.toggle_font_section(section),
+            AppearAction::Setting(id) => self.activate_setting(id),
+            AppearAction::Color(index) => {
+                if let Some(editor) = self.theme_editor.as_mut() {
+                    editor.select(index);
+                }
+                self.dispatch_theme_editor(EditorKey::Enter, false);
+            }
+            AppearAction::Search => self.focus_settings_query(),
+            AppearAction::None => {}
+        }
+    }
+
+    fn activate_setting(&mut self, id: SettingId) {
+        match id {
+            SettingId::Themes => {
+                self.settings_query.clear();
+                self.settings_cursor = 0;
+                self.settings_query_on = false;
+                self.appear = AppearSection::Theme;
+                self.font_filter = None;
+                if let Some(picker) = &self.theme_picker {
+                    self.settings_selected = picker.selected;
+                }
+                self.reveal_settings_selection();
+            }
+            SettingId::Fonts(slot) => {
+                self.settings_query.clear();
+                self.settings_cursor = 0;
+                self.settings_query_on = false;
+                let section = match slot {
+                    FontSlot::Editor => AppearSection::Mono,
+                    FontSlot::Preview => AppearSection::Sans,
+                };
+                self.focus_fonts(section);
+                self.sync_family_selection();
+            }
+            SettingId::Colors => self.show_colors(),
+            SettingId::Wrap => {
+                if !self.need_vault() {
+                    return;
+                }
+                if let Some(open) = &mut self.open {
+                    open.wrap = !open.wrap;
+                }
+                self.persist();
+            }
+            SettingId::Preview => {
+                if self.need_vault() {
+                    self.toggle_preview();
+                }
+            }
+            SettingId::FocusMode => {
+                if self.need_vault() {
+                    self.toggle_focus();
+                }
+            }
+            SettingId::Zen => {
+                if self.need_vault() {
+                    self.toggle_zen();
+                }
+            }
+            SettingId::Explore => {
+                if self.need_vault() {
+                    self.toggle_explore();
+                }
+            }
+            SettingId::AiEnabled => {
+                if self.ai.settings.enabled {
+                    self.ai_disable();
+                } else {
+                    self.ai_enable();
+                }
+            }
+            SettingId::AiProvider(name) => self.set_ai_provider(name),
+            SettingId::AiModel => self.prompt_ai_model(),
+            SettingId::AiKey => self.prompt_ai_key(false),
+            SettingId::Chord(chord) => self.run_chord(chord),
+        }
+    }
+
+    fn setting_value(&self, id: SettingId) -> String {
+        let on_off = |on: bool| if on { "on" } else { "off" };
+        let vault = |flag: Option<bool>| flag.map(on_off).unwrap_or("—").to_string();
+        match id {
+            SettingId::Wrap => vault(self.open.as_ref().map(|open| open.wrap)),
+            SettingId::Preview => vault(self.open.as_ref().map(|open| open.preview_visible)),
+            SettingId::FocusMode => vault(self.open.as_ref().map(|open| open.focus_mode)),
+            SettingId::Zen => vault(self.open.as_ref().map(|open| open.zen)),
+            SettingId::Explore => vault(self.open.as_ref().map(|open| open.explore)),
+            SettingId::AiEnabled => on_off(self.ai.settings.enabled).to_string(),
+            SettingId::AiProvider(name) => {
+                if self.ai.settings.provider == name {
+                    "on".to_string()
+                } else {
+                    String::new()
+                }
+            }
+            SettingId::AiModel => self.ai.settings.resolved_model(),
+            SettingId::AiKey => {
+                if self.ai.settings.has_api_key() {
+                    "saved".to_string()
+                } else {
+                    "not set".to_string()
+                }
+            }
+            _ => String::new(),
+        }
+    }
+
+    fn sheet_doc(&self) -> SheetDoc {
+        let mut build = DocBuild {
+            blocks: Vec::new(),
+            hits: Vec::new(),
+            y: 0.0,
+            help_y: 0.0,
+            framed: false,
+        };
+        if !self.settings_query.trim().is_empty() {
+            let rows = crate::settings::matching_rows(self.settings_query.trim());
+            build.push(head_line("Results"), 0);
+            if rows.is_empty() {
+                build.push(doc_note("(no matching settings)".into()), 0);
+            }
+            for row in &rows {
+                let selected = build.hits.len() == self.settings_selected;
+                build.push(self.option_from_row(row, selected), section_of(row.page));
+            }
+            return build.finish();
+        }
+        if let Some(editor) = &self.theme_editor {
+            for line in color_lines(editor) {
+                build.push(line, 0);
+            }
+            self.push_help(&mut build);
+            return build.finish();
+        }
+        build.push(head_line("Appearance"), 0);
+        if let Some(picker) = &self.theme_picker {
+            for (index, row) in picker.rows.iter().enumerate() {
+                let selected = build.hits.len() == self.settings_selected;
+                build.push(
+                    option_line(
+                        picker_label(row),
+                        String::new(),
+                        String::new(),
+                        selected,
+                        AppearAction::Theme(index),
+                    ),
+                    0,
+                );
+            }
+        }
+        self.push_font_block(&mut build, FontSlot::Editor, AppearSection::Mono);
+        self.push_font_block(&mut build, FontSlot::Preview, AppearSection::Sans);
+        let selected = build.hits.len() == self.settings_selected;
+        build.push(
+            option_line(
+                "Edit colors".into(),
+                "Hex overrides on the applied theme. R resets to the built-in palette.".into(),
+                "e".into(),
+                selected,
+                AppearAction::Setting(SettingId::Colors),
+            ),
+            0,
+        );
+        let mut last_page = None;
+        let mut saw_provider = false;
+        for row in crate::settings::all_rows() {
+            if matches!(
+                row.id,
+                SettingId::Themes | SettingId::Fonts(_) | SettingId::Colors
+            ) {
+                continue;
+            }
+            let section = section_of(row.page);
+            if last_page != Some(row.page) {
+                build.push(head_line(row.page.label()), section);
+                last_page = Some(row.page);
+            }
+            if matches!(row.id, SettingId::AiProvider(_)) && !saw_provider {
+                build.push(head_line("Provider"), section);
+                saw_provider = true;
+            }
+            let selected = build.hits.len() == self.settings_selected;
+            build.push(self.option_from_row(&row, selected), section);
+        }
+        self.push_help(&mut build);
+        build.finish()
+    }
+
+    fn option_from_row(&self, row: &SettingRow, selected: bool) -> AppearLine {
+        let state = self.setting_value(row.id);
+        let value = match (state.is_empty(), row.keys.is_empty()) {
+            (false, false) => format!("{state}  {}", row.keys),
+            (false, true) => state,
+            (true, false) => row.keys.to_string(),
+            (true, true) => String::new(),
+        };
+        option_line(
+            row.title.to_string(),
+            row.detail.to_string(),
+            value,
+            selected,
+            AppearAction::Setting(row.id),
+        )
+    }
+
+    fn push_font_block(&self, build: &mut DocBuild, slot: FontSlot, section: AppearSection) {
+        let (title, detail, value) = match slot {
+            FontSlot::Editor => (
+                "Editor font",
+                "Monospace face for notes, the tree, and chrome.",
+                self.mono.clone(),
+            ),
+            FontSlot::Preview => (
+                "Preview font",
+                "Proportional face for preview prose.",
+                self.sans.clone(),
+            ),
+        };
+        let selected = build.hits.len() == self.settings_selected;
+        build.push(
+            option_line(
+                title.into(),
+                detail.into(),
+                value,
+                selected,
+                AppearAction::Focus(section),
+            ),
+            0,
+        );
+        if self.appear != section {
+            return;
+        }
+        let choices = self.font_choices();
+        if choices.is_empty() {
+            build.push(doc_note("(no matching fonts)".into()), 0);
+            return;
+        }
+        for (index, name) in choices.into_iter().enumerate() {
+            let selected = build.hits.len() == self.settings_selected;
+            build.push(
+                option_line(
+                    name,
+                    String::new(),
+                    String::new(),
+                    selected,
+                    AppearAction::Family(index),
+                ),
+                0,
+            );
+        }
+    }
+
+    fn push_help(&self, build: &mut DocBuild) {
+        build.push(head_line("Help"), 5);
+        for line in help_lines() {
+            let text = if line.is_empty() {
+                " ".to_string()
+            } else {
+                line
+            };
+            build.push(doc_note(text), 5);
+        }
+    }
+
+    fn appearance_view(&self) -> AppearanceView {
+        let doc = self.sheet_doc();
+        let hint = if self.settings_query_on {
+            "type to filter    up/down move    Enter    Esc clear".to_string()
+        } else if self.font_filter.is_some() {
+            "type to filter    up/down live    Enter keep    Esc clear".to_string()
+        } else if self.theme_editor.is_some() {
+            let target = self
+                .theme_editor
+                .as_ref()
+                .map(|editor| editor.save_target.label())
+                .unwrap_or("");
+            format!("j/k move    y save {target}    Tab target    R reset    Esc back")
+        } else {
+            "j/k move    Enter    / search    [ ] section    y save    Esc revert".to_string()
+        };
+        let font_query = if self.appear == AppearSection::Theme || self.theme_editor.is_some() {
             None
         } else {
             self.font_filter.as_ref().map(|query| FieldText {
@@ -4793,78 +5603,22 @@ impl Shell {
             })
         };
         AppearanceView {
-            title,
+            title: "Settings".into(),
             hint,
             font_query,
-            lines,
-            editor_font: self.mono.clone(),
-            preview_font: self.sans.clone(),
-            editor_on: self.appear == AppearSection::Mono,
-            preview_on: self.appear == AppearSection::Sans,
+            lines: doc.blocks,
+            content_h: doc.content_h,
+            query: FieldText {
+                text: self.settings_query.clone(),
+                cursor: self.settings_cursor,
+            },
+            query_on: self.settings_query_on,
+            port: self.settings_port.handle.clone(),
         }
-    }
-
-    fn font_section_view(&self, rows: usize) -> (String, String, Vec<AppearLine>) {
-        let choices = self.font_choices();
-        let live = self.live_family();
-        let title = match self.appear {
-            AppearSection::Sans => "Appearance · preview font",
-            _ => "Appearance · editor font",
-        };
-        let hint = if self.font_filter.is_some() {
-            "Enter keep    Esc clear".into()
-        } else {
-            "j/k live    Enter keep    / filter    f cycle    h back    s save".into()
-        };
-        let start = self.family_scroll.min(choices.len());
-        let mut lines: Vec<AppearLine> = choices
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(rows)
-            .map(|(index, name)| {
-                plain_line(name.clone(), name == &live, AppearAction::Family(index))
-            })
-            .collect();
-        if lines.is_empty() {
-            lines.push(plain_line(
-                "(no matching fonts)".to_string(),
-                false,
-                AppearAction::None,
-            ));
-        }
-        (title.into(), hint, lines)
     }
 
     fn sheet_list_rows(&self) -> usize {
-        self.help_view.max(10).saturating_sub(5).max(3)
-    }
-
-    fn scroll_theme(&mut self, rows: isize) {
-        if rows == 0 {
-            return;
-        }
-        if self.appear != AppearSection::Theme {
-            self.nudge_font(rows);
-            return;
-        }
-        let delta = rows as i32;
-        if let Some(editor) = self.theme_editor.as_mut() {
-            let next = editor.selected as i32 + delta;
-            editor.select(next.max(0) as usize);
-            return;
-        }
-        let changed = if let Some(picker) = self.theme_picker.as_mut() {
-            let before = picker.selected;
-            let next = picker.selected as i32 + delta;
-            picker.select(next.max(0) as usize);
-            picker.selected != before
-        } else {
-            false
-        };
-        if changed {
-            self.preview_theme_row();
-        }
+        self.help_view.max(10).saturating_sub(6).max(3)
     }
 
     fn preview_theme_row(&mut self) {
@@ -5053,6 +5807,7 @@ impl Shell {
         self.reveal_family();
         let name = choices[next].clone();
         self.apply_font_choice(&name);
+        self.sync_family_selection();
     }
 
     fn choose_family(&mut self, index: usize) {
@@ -5063,6 +5818,7 @@ impl Shell {
         self.family_selected = index;
         self.reveal_family();
         self.apply_font_choice(&name);
+        self.sync_family_selection();
     }
 
     fn cycle_appear(&mut self) {
@@ -5085,47 +5841,6 @@ impl Shell {
         self.font_filter = None;
         self.font_cursor = 0;
         self.retarget_font_highlight();
-    }
-
-    fn handle_font_section(&mut self, press: KeyPress<'_>) -> Effect {
-        if press.key == "escape" {
-            self.close_theme(true);
-            return Effect::None;
-        }
-        if press.control {
-            return Effect::None;
-        }
-        if press.key_char == Some("f") {
-            self.cycle_appear();
-            return Effect::None;
-        }
-        if press.key == "/" || press.key_char == Some("/") {
-            self.font_filter = Some(String::new());
-            self.font_cursor = 0;
-            self.retarget_font_highlight();
-            return Effect::None;
-        }
-        if matches!(press.key, "left" | "h") || press.key_char == Some("h") {
-            self.appear = AppearSection::Theme;
-            self.font_filter = None;
-            self.font_cursor = 0;
-            return Effect::None;
-        }
-        if press.key == "enter" || press.key == "return" {
-            self.keep_fonts();
-            return Effect::None;
-        }
-        if matches!(
-            press.key_char,
-            Some("s") | Some("S") | Some("y") | Some("Y")
-        ) {
-            self.request_save_theme();
-            return Effect::None;
-        }
-        if let Some(delta) = font_delta(press) {
-            self.nudge_font(delta);
-        }
-        Effect::None
     }
 
     fn handle_font_filter(&mut self, press: KeyPress<'_>) -> Effect {
@@ -5204,6 +5919,14 @@ impl Shell {
     }
 
     fn appear_click(&mut self, action: AppearAction) {
+        if let Some(index) = self
+            .sheet_doc()
+            .hits
+            .iter()
+            .position(|hit| hit.action == action)
+        {
+            self.settings_selected = index;
+        }
         match action {
             AppearAction::None => {}
             AppearAction::Theme(index) => self.pick_theme_row(index),
@@ -5213,16 +5936,38 @@ impl Shell {
                 }
             }
             AppearAction::Family(index) => self.choose_family(index),
-            AppearAction::Focus(section) => {
-                self.font_filter = None;
-                self.font_cursor = 0;
-                if section == AppearSection::Theme {
-                    self.appear = AppearSection::Theme;
-                } else {
-                    self.focus_fonts(section);
-                }
-            }
+            AppearAction::Focus(section) => self.toggle_font_section(section),
+            AppearAction::Setting(id) => self.activate_setting(id),
+            AppearAction::Search => self.focus_settings_query(),
         }
+        self.reveal_settings_selection();
+    }
+
+    fn toggle_font_section(&mut self, section: AppearSection) {
+        self.font_filter = None;
+        self.font_cursor = 0;
+        if self.appear == section || section == AppearSection::Theme {
+            self.appear = AppearSection::Theme;
+            self.reveal_settings_selection();
+            return;
+        }
+        self.focus_fonts(section);
+        self.sync_family_selection();
+    }
+
+    fn sync_family_selection(&mut self) {
+        let choices = self.font_choices();
+        let live = self.live_family();
+        let index = choices.iter().position(|name| name == &live).unwrap_or(0);
+        if let Some(hit) = self
+            .sheet_doc()
+            .hits
+            .iter()
+            .position(|hit| matches!(hit.action, AppearAction::Family(at) if at == index))
+        {
+            self.settings_selected = hit;
+        }
+        self.reveal_settings_selection();
     }
 
     fn split_at(&self, pos: Point<Pixels>) -> Option<SplitDrag> {
@@ -5384,10 +6129,13 @@ impl Render for Shell {
                         hint: String::new(),
                         font_query: None,
                         lines: Vec::new(),
-                        editor_font: String::new(),
-                        preview_font: String::new(),
-                        editor_on: false,
-                        preview_on: false,
+                        content_h: 1.0,
+                        query: FieldText {
+                            text: String::new(),
+                            cursor: 0,
+                        },
+                        query_on: false,
+                        port: ScrollHandle::new(),
                     }),
                     entity.clone(),
                 ))
@@ -6424,13 +7172,74 @@ fn point_in(bounds: Bounds<Pixels>, pos: Point<Pixels>) -> bool {
     bounds.contains(&pos)
 }
 
-fn plain_line(text: String, selected: bool, action: AppearAction) -> AppearLine {
+fn block_h(kind: LineKind) -> f32 {
+    match kind {
+        LineKind::Head => HEAD_H,
+        LineKind::Option => OPTION_H,
+        LineKind::Note => NOTE_H,
+        LineKind::Hex => HEX_H,
+        LineKind::Rule => RULE_H,
+        LineKind::Gap => SECTION_GAP,
+    }
+}
+
+fn section_of(page: SettingsPage) -> u8 {
+    match page {
+        SettingsPage::Appearance => 0,
+        SettingsPage::Editor => 1,
+        SettingsPage::Window => 2,
+        SettingsPage::Ai => 3,
+        SettingsPage::Keymap => 4,
+    }
+}
+
+fn blank_line(text: String, kind: LineKind, action: AppearAction, selected: bool) -> AppearLine {
     AppearLine {
         text,
+        detail: String::new(),
+        value: String::new(),
         caret: None,
         hex: None,
         selected,
+        dim: kind == LineKind::Note,
         action,
+        kind,
+    }
+}
+
+fn head_line(text: &str) -> AppearLine {
+    blank_line(text.to_string(), LineKind::Head, AppearAction::None, false)
+}
+
+fn rule_line() -> AppearLine {
+    blank_line(String::new(), LineKind::Rule, AppearAction::None, false)
+}
+
+fn gap_line() -> AppearLine {
+    blank_line(String::new(), LineKind::Gap, AppearAction::None, false)
+}
+
+fn doc_note(text: String) -> AppearLine {
+    blank_line(text, LineKind::Note, AppearAction::None, false)
+}
+
+fn option_line(
+    text: String,
+    detail: String,
+    value: String,
+    selected: bool,
+    action: AppearAction,
+) -> AppearLine {
+    AppearLine {
+        text,
+        detail,
+        value,
+        caret: None,
+        hex: None,
+        selected,
+        dim: false,
+        action,
+        kind: LineKind::Option,
     }
 }
 
@@ -6512,6 +7321,7 @@ fn line_hit(entity: Entity<Shell>, slot: LineSlot, prefix: usize) -> gpui::Div {
                         LineSlot::Ai => shell.line_hits.ai = Some(hit),
                         LineSlot::Cmd => shell.line_hits.cmd = Some(hit),
                         LineSlot::Font => shell.line_hits.font = Some(hit),
+                        LineSlot::Search => shell.line_hits.search = Some(hit),
                     }
                 });
             },
@@ -6897,20 +7707,6 @@ fn theme_motion(key: EditorKey) -> bool {
     )
 }
 
-fn font_delta(press: KeyPress<'_>) -> Option<isize> {
-    if press.key_char == Some("G") || press.key == "end" {
-        return Some(isize::MAX);
-    }
-    if press.key == "home" || press.key == "g" || press.key_char == Some("g") {
-        return Some(isize::MIN);
-    }
-    font_arrow_delta(press).or(match press.key {
-        "j" => Some(1),
-        "k" => Some(-1),
-        _ => None,
-    })
-}
-
 fn font_arrow_delta(press: KeyPress<'_>) -> Option<isize> {
     match press.key {
         "down" => Some(1),
@@ -6951,31 +7747,13 @@ fn picker_label(row: &PickerRow) -> String {
     }
 }
 
-fn theme_lines(picker: &ThemePicker, rows: usize) -> Vec<AppearLine> {
-    let start = picker.scroll.min(picker.rows.len());
-    picker
-        .rows
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(rows)
-        .map(|(index, row)| {
-            plain_line(
-                picker_label(row),
-                index == picker.selected,
-                AppearAction::Theme(index),
-            )
-        })
-        .collect()
-}
-
-fn color_lines(editor: &ThemeEditor, rows: usize) -> Vec<AppearLine> {
+fn color_lines(editor: &ThemeEditor) -> Vec<AppearLine> {
     let view = theme_editor_rows(&editor.fields);
     let mut lines = Vec::new();
-    for row in view.iter().skip(editor.scroll.min(view.len())).take(rows) {
+    for row in &view {
         match row {
             ThemeEditorRow::Header(group) => {
-                lines.push(plain_line(format!("— {group}"), false, AppearAction::None));
+                lines.push(head_line(group));
             }
             ThemeEditorRow::Color(idx) => {
                 let key = editor.fields.get(*idx).map(|field| field.key).unwrap_or("");
@@ -7019,10 +7797,14 @@ fn color_lines(editor: &ThemeEditor, rows: usize) -> Vec<AppearLine> {
                 };
                 lines.push(AppearLine {
                     text,
+                    detail: String::new(),
+                    value: String::new(),
                     caret,
                     hex,
                     selected,
+                    dim: false,
                     action: AppearAction::Color(*idx),
+                    kind: LineKind::Hex,
                 });
             }
         }
@@ -7055,17 +7837,76 @@ fn help_panel(theme: &GuiTheme, lines: &[String]) -> gpui::Div {
 }
 
 fn appearance_sheet(theme: &GuiTheme, view: &AppearanceView, entity: Entity<Shell>) -> gpui::Div {
-    let mut list = div().flex_1().min_h(px(0.)).overflow_hidden();
+    let mut column = div().w_full().h(px(view.content_h)).flex().flex_col();
     for line in &view.lines {
-        list = list.child(appear_line(theme, line, entity.clone()));
+        column = column.child(appear_line(theme, line, entity.clone()));
     }
-    let mut sheet = div()
+    let search = if view.query_on {
+        caret_row(
+            theme,
+            CaretPaint {
+                prefix: "Search  ",
+                text: &view.query.text,
+                cursor: view.query.cursor,
+                mask: false,
+                suffix: "",
+                color: theme.text_labels,
+                background: None,
+                slot: LineSlot::Search,
+                prefix_cols: 8,
+            },
+            entity.clone(),
+        )
+    } else {
+        appear_line(
+            theme,
+            &option_line(
+                "Search".to_string(),
+                "Filter every option in this sheet.".to_string(),
+                String::new(),
+                false,
+                AppearAction::Search,
+            ),
+            entity.clone(),
+        )
+    };
+    let mut content = div()
+        .flex_1()
+        .min_h(px(0.))
+        .relative()
+        .overflow_hidden()
+        .child(y_scroll("settings-scroll", &view.port, column));
+    if let Some(query) = &view.font_query {
+        content = div()
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .child(caret_row(
+                theme,
+                CaretPaint {
+                    prefix: "/",
+                    text: &query.text,
+                    cursor: query.cursor,
+                    mask: false,
+                    suffix: "",
+                    color: theme.text_labels,
+                    background: None,
+                    slot: LineSlot::Font,
+                    prefix_cols: 1,
+                },
+                entity.clone(),
+            ))
+            .child(content);
+    }
+    let place = entity.clone();
+    div()
         .absolute()
         .top(px(CHROME))
         .right(px(0.))
         .bottom(px(CHROME))
-        .w(px(SHEET_W))
-        .max_w(relative(0.46))
+        .w(relative(0.5))
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -7075,46 +7916,19 @@ fn appearance_sheet(theme: &GuiTheme, view: &AppearanceView, entity: Entity<Shel
         .text_color(rgb(theme.modal_text))
         .border_l_1()
         .border_color(rgb(theme.border_default))
-        .child(sheet_heading(theme, &view.title));
-    if let Some(query) = &view.font_query {
-        sheet = sheet.child(caret_row(
-            theme,
-            CaretPaint {
-                prefix: "/",
-                text: &query.text,
-                cursor: query.cursor,
-                mask: false,
-                suffix: "",
-                color: theme.text_labels,
-                background: None,
-                slot: LineSlot::Font,
-                prefix_cols: 1,
-            },
-            entity.clone(),
-        ));
-    }
-    sheet
+        .on_mouse_down(MouseButton::Left, move |event, _window, cx| {
+            let pos = event.position;
+            place.update(cx, |shell, cx| {
+                cx.stop_propagation();
+                if shell.place_line_clicks(pos) {
+                    cx.notify();
+                }
+            });
+        })
+        .child(sheet_heading(theme, &view.title))
+        .child(search)
         .child(sheet_heading(theme, &view.hint))
-        .child(list)
-        .child(sheet_heading(theme, "Fonts"))
-        .child(appear_line(
-            theme,
-            &plain_line(
-                format!("Editor   {}", view.editor_font),
-                view.editor_on,
-                AppearAction::Focus(AppearSection::Mono),
-            ),
-            entity.clone(),
-        ))
-        .child(appear_line(
-            theme,
-            &plain_line(
-                format!("Preview  {}", view.preview_font),
-                view.preview_on,
-                AppearAction::Focus(AppearSection::Sans),
-            ),
-            entity,
-        ))
+        .child(content)
 }
 
 fn sheet_heading(theme: &GuiTheme, text: &str) -> gpui::Div {
@@ -7130,16 +7944,150 @@ fn sheet_heading(theme: &GuiTheme, text: &str) -> gpui::Div {
         })
 }
 
+fn sheet_block(theme: &GuiTheme, text: &str, height: f32, dim: bool, header: bool) -> gpui::Div {
+    let shown = if text.is_empty() {
+        " ".to_string()
+    } else {
+        text.to_string()
+    };
+    side_rule(
+        theme,
+        div()
+            .h(px(height))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .when(dim, |row| row.text_color(rgb(theme.text_secondary)))
+            .when(header, |row| {
+                row.bg(rgb(theme.body_background))
+                    .text_color(rgb(theme.modal_header))
+                    .font_weight(FontWeight::BOLD)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .child(shown),
+    )
+}
+
+fn option_block(theme: &GuiTheme, line: &AppearLine, entity: Entity<Shell>) -> gpui::Div {
+    let action = line.action;
+    let click = entity.clone();
+    let title = if line.text.is_empty() {
+        " ".to_string()
+    } else {
+        line.text.clone()
+    };
+    let value = line.value.clone();
+    let detail = line.detail.clone();
+    let selected = line.selected;
+    let hover_bg = theme.body_background;
+    side_rule(
+        theme,
+        div()
+            .w_full()
+            .h(px(OPTION_H))
+            .px(px(8.))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .cursor_pointer()
+            .when(selected, |row| {
+                row.bg(rgb(theme.selected_background))
+                    .text_color(rgb(theme.text_active_focus))
+            })
+            .hover(move |style| style.bg(rgb(hover_bg)))
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                click.update(cx, |shell, cx| {
+                    cx.stop_propagation();
+                    shell.appear_click(action);
+                    cx.notify();
+                });
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(title),
+                    )
+                    .when(!value.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .ml(px(12.))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .when(!selected, |value| value.text_color(rgb(theme.text_labels)))
+                                .child(value),
+                        )
+                    }),
+            )
+            .when(!detail.is_empty(), |row| {
+                row.child(
+                    div()
+                        .mt(px(2.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(12.))
+                        .when(!selected, |detail| {
+                            detail.text_color(rgb(theme.text_secondary))
+                        })
+                        .child(detail),
+                )
+            }),
+    )
+}
+
+fn side_rule(theme: &GuiTheme, row: gpui::Div) -> gpui::Div {
+    row.border_l_1()
+        .border_r_1()
+        .border_color(rgb(theme.border_default))
+}
+
 fn appear_line(theme: &GuiTheme, line: &AppearLine, entity: Entity<Shell>) -> gpui::Div {
+    match line.kind {
+        LineKind::Option => return option_block(theme, line, entity),
+        LineKind::Head => return sheet_block(theme, &line.text, HEAD_H, false, true),
+        LineKind::Note => return sheet_block(theme, &line.text, NOTE_H, true, false),
+        LineKind::Rule => {
+            return div()
+                .h(px(RULE_H))
+                .w_full()
+                .bg(rgb(theme.border_default))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                });
+        }
+        LineKind::Gap => {
+            return div().h(px(SECTION_GAP)).w_full().on_mouse_down(
+                MouseButton::Left,
+                |_, _, cx| {
+                    cx.stop_propagation();
+                },
+            );
+        }
+        LineKind::Hex => {}
+    }
     let action = line.action;
     let click = entity.clone();
     let mut row = div()
         .relative()
-        .h(px(LINE))
+        .h(px(HEX_H))
         .overflow_hidden()
         .whitespace_nowrap()
         .when(line.caret.is_some(), |row| row.cursor_text())
         .when(line.caret.is_none(), |row| row.cursor_pointer())
+        .when(line.dim && !line.selected, |row| {
+            row.text_color(rgb(theme.text_secondary))
+        })
         .when(line.selected, |row| {
             row.bg(rgb(theme.selected_background))
                 .text_color(rgb(theme.text_active_focus))
@@ -7205,7 +8153,7 @@ fn appear_line(theme: &GuiTheme, line: &AppearLine, entity: Entity<Shell>) -> gp
             ),
         );
     }
-    row
+    side_rule(theme, row)
 }
 
 fn sheet_frame(theme: &GuiTheme, title: &str) -> gpui::Div {
@@ -7354,7 +8302,7 @@ mod chrome_tests {
         assert!(line.contains("z focus"));
         assert!(line.contains("h zen"));
         assert!(line.contains("e explore"));
-        assert!(line.contains("F1: Help"));
+        assert!(line.contains("F1: Settings"));
         assert!(line.contains(cancel));
         assert!(leader_footer(Leader::None).is_none());
     }

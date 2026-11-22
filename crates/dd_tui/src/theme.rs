@@ -213,6 +213,7 @@ fn color_to_rgb(color: Color) -> ldnddev_theme::Rgb {
     }
 }
 
+#[cfg(test)]
 pub fn color_to_hex(c: Color) -> String {
     match c {
         Color::Rgb(r, g, b) => format!("#{r:02X}{g:02X}{b:02X}"),
