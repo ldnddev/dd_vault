@@ -233,10 +233,18 @@ pub struct App {
     pub show_help: bool,
     pub help_scroll: u16,
     pub help_scroll_max: u16,
-    /// Draw should scroll the settings sheet to the Help section once.
+    /// Draw should show the Help page of Settings once.
     pub settings_jump_help: bool,
     /// Draw should keep the highlighted settings row on screen once.
     pub settings_follow: bool,
+    /// Left-hand section. 0 themes, 1 editor, 2 window, 3 ai, 4 keymap, 5 help.
+    pub settings_nav: u8,
+    /// Highlighted row on Editor, Window, AI, and Keymap.
+    pub settings_row: usize,
+    /// A prompt opened from Settings takes keys until it closes.
+    pub settings_modal: bool,
+    /// Last drawn section list. A zero-size rect is inactive.
+    pub settings_nav_area: Rect,
     pub show_theme: bool,
     pub theme_picker: Option<ldnddev_theme::ThemePicker>,
     pub theme_editor: Option<ldnddev_theme::ThemeEditor>,
@@ -345,6 +353,9 @@ impl App {
         self.show_theme = true;
         self.settings_jump_help = false;
         self.settings_follow = true;
+        self.settings_nav = 0;
+        self.settings_row = 0;
+        self.settings_modal = false;
         self.help_scroll = 0;
         self.leader = Leader::None;
         let palette = crate::theme::palette_from_theme(&self.theme);
@@ -365,7 +376,7 @@ impl App {
         }
     }
 
-    /// Open Settings and scroll to the Help section.
+    /// Open Settings on the Help page.
     /// An open color editor returns to the theme list when that list exists.
     pub fn show_settings_help(&mut self) {
         if !self.show_theme {
@@ -380,6 +391,9 @@ impl App {
                 crate::theme::apply_palette(&mut self.theme, &editor.palette);
             }
         }
+        self.settings_nav = crate::settings::HELP;
+        self.settings_row = 0;
+        self.help_scroll = 0;
         self.settings_jump_help = true;
         self.settings_follow = false;
         self.show_help = false;
@@ -409,6 +423,10 @@ impl App {
             help_scroll_max: 0,
             settings_jump_help: false,
             settings_follow: false,
+            settings_nav: 0,
+            settings_row: 0,
+            settings_modal: false,
+            settings_nav_area: Rect::default(),
             show_theme: false,
             theme_picker: None,
             theme_editor: None,

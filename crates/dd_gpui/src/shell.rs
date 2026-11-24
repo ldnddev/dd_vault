@@ -76,8 +76,6 @@ const OPTION_H: f32 = 52.0;
 const HEAD_H: f32 = 28.0;
 const NOTE_H: f32 = 22.0;
 const HEX_H: f32 = 40.0;
-const RULE_H: f32 = 2.0;
-const SECTION_GAP: f32 = 12.0;
 const BAR_W: f32 = 10.0;
 
 pub struct Boot {
@@ -101,7 +99,7 @@ pub fn run(boot: Boot) {
                 }),
                 focus: true,
                 show: true,
-                app_id: Some("dd_vault-gui".into()),
+                app_id: Some("dev.ldnddev.dd_vault".into()),
                 ..Default::default()
             },
             move |window, cx| {
@@ -316,6 +314,8 @@ pub struct Shell {
     settings_query: String,
     settings_cursor: usize,
     settings_query_on: bool,
+    /// Left-hand section. 0 themes, 1 editor, 2 window, 3 ai, 4 keymap, 5 help.
+    settings_nav: u8,
     settings_selected: usize,
     measured_mono: String,
     body_cols: u16,
@@ -434,8 +434,6 @@ enum LineKind {
     Head,
     Option,
     Note,
-    Rule,
-    Gap,
     Hex,
 }
 
@@ -454,7 +452,6 @@ struct AppearLine {
 
 struct DocHit {
     action: AppearAction,
-    section: u8,
     y: f32,
     h: f32,
 }
@@ -462,7 +459,6 @@ struct DocHit {
 struct SheetDoc {
     blocks: Vec<AppearLine>,
     hits: Vec<DocHit>,
-    help_y: f32,
     content_h: f32,
 }
 
@@ -470,39 +466,16 @@ struct DocBuild {
     blocks: Vec<AppearLine>,
     hits: Vec<DocHit>,
     y: f32,
-    help_y: f32,
-    framed: bool,
 }
 
 impl DocBuild {
-    fn push(&mut self, line: AppearLine, section: u8) {
-        if line.kind == LineKind::Head {
-            self.open_frame(section, &line.text);
-        }
-        self.add(line, section);
-    }
-
-    /// Close the previous box, leave a gap, and open the next one.
-    fn open_frame(&mut self, section: u8, title: &str) {
-        if self.framed {
-            self.add(rule_line(), section);
-            self.add(gap_line(), section);
-        }
-        if title == "Help" {
-            self.help_y = self.y;
-        }
-        self.add(rule_line(), section);
-        self.framed = true;
-    }
-
-    fn add(&mut self, line: AppearLine, section: u8) {
+    fn push(&mut self, line: AppearLine) {
         let h = block_h(line.kind);
         if matches!(line.kind, LineKind::Option | LineKind::Hex)
             && !matches!(line.action, AppearAction::None)
         {
             self.hits.push(DocHit {
                 action: line.action,
-                section,
                 y: self.y,
                 h,
             });
@@ -511,14 +484,10 @@ impl DocBuild {
         self.blocks.push(line);
     }
 
-    fn finish(mut self) -> SheetDoc {
-        if self.framed {
-            self.add(rule_line(), 0);
-        }
+    fn finish(self) -> SheetDoc {
         SheetDoc {
             blocks: self.blocks,
             hits: self.hits,
-            help_y: self.help_y,
             content_h: self.y.max(1.0),
         }
     }
@@ -526,7 +495,9 @@ impl DocBuild {
 
 struct AppearanceView {
     title: String,
+    section: String,
     hint: String,
+    nav: u8,
     font_query: Option<FieldText>,
     lines: Vec<AppearLine>,
     content_h: f32,
@@ -691,6 +662,7 @@ impl Shell {
             settings_query: String::new(),
             settings_cursor: 0,
             settings_query_on: false,
+            settings_nav: 0,
             settings_selected: 0,
             measured_mono: String::new(),
             body_cols: 120,
@@ -4770,8 +4742,10 @@ impl Shell {
         self.settings_query_on = false;
         self.font_filter = None;
         self.font_cursor = 0;
-        let help_y = self.sheet_doc().help_y;
-        self.settings_port.push_px(help_y);
+        self.appear = AppearSection::Theme;
+        self.settings_nav = 5;
+        self.settings_selected = 0;
+        self.settings_port.push_px(0.0);
     }
 
     fn handle_help_key(&mut self, press: KeyPress<'_>) -> Effect {
@@ -4834,6 +4808,7 @@ impl Shell {
         self.font_cursor = 0;
         self.family_selected = 0;
         self.family_scroll = 0;
+        self.settings_nav = 0;
         self.reset_settings_query();
         let picker = ThemePicker::new(
             self.palette.clone(),
@@ -4856,15 +4831,23 @@ impl Shell {
             self.close_theme(true);
             return Effect::None;
         }
+        if let Some(dir) = settings_tab_dir(press) {
+            self.jump_section(dir);
+            return Effect::None;
+        }
         if self.settings_query_on {
             return self.handle_settings_query(press);
         }
-        if self.font_filter.is_some() && self.theme_editor.is_none() {
+        if self.settings_nav == 0 && self.font_filter.is_some() && self.theme_editor.is_none() {
             return self.handle_font_filter(press);
         }
         if !press.control && !self.editing_hex() {
             let slash = press.key == "/" || press.key_char == Some("/");
-            if slash && self.appear != AppearSection::Theme && self.theme_editor.is_none() {
+            if slash
+                && self.settings_nav == 0
+                && self.appear != AppearSection::Theme
+                && self.theme_editor.is_none()
+            {
                 self.font_filter = Some(String::new());
                 self.font_cursor = 0;
                 self.retarget_font_highlight();
@@ -4874,16 +4857,6 @@ impl Shell {
                 self.focus_settings_query();
                 return Effect::None;
             }
-        }
-        if self.theme_editor.is_some() {
-            let Some(key) = editor_key(press.key, press.key_char, press.control) else {
-                return Effect::None;
-            };
-            self.dispatch_theme_editor(key, press.shift);
-            self.reveal_settings_selection();
-            return Effect::None;
-        }
-        if !press.control {
             if press.key == "bracketright" || press.key_char == Some("]") {
                 self.jump_section(1);
                 return Effect::None;
@@ -4892,6 +4865,20 @@ impl Shell {
                 self.jump_section(-1);
                 return Effect::None;
             }
+            if self.settings_nav == 0 && matches!(press.key_char, Some("t") | Some("T")) {
+                self.toggle_save_target();
+                return Effect::None;
+            }
+        }
+        if self.settings_nav == 0 && self.theme_editor.is_some() {
+            let Some(key) = editor_key(press.key, press.key_char, press.control) else {
+                return Effect::None;
+            };
+            self.dispatch_theme_editor(key, press.shift);
+            self.reveal_settings_selection();
+            return Effect::None;
+        }
+        if !press.control && self.settings_nav == 0 {
             if matches!(
                 press.key_char,
                 Some("y") | Some("Y") | Some("s") | Some("S")
@@ -4901,10 +4888,6 @@ impl Shell {
             }
             if matches!(press.key_char, Some("e") | Some("E")) {
                 self.show_colors();
-                return Effect::None;
-            }
-            if press.key == "tab" {
-                self.dispatch_theme_picker(EditorKey::Tab);
                 return Effect::None;
             }
             if press.key_char == Some("f") {
@@ -4940,6 +4923,16 @@ impl Shell {
                 self.reveal_settings_selection();
                 return Effect::None;
             }
+        }
+        if !press.control
+            && self.settings_nav != 0
+            && matches!(
+                press.key_char,
+                Some("y") | Some("Y") | Some("s") | Some("S")
+            )
+        {
+            self.request_save_theme();
+            return Effect::None;
         }
         self.handle_settings_list(press)
     }
@@ -5045,6 +5038,7 @@ impl Shell {
         self.appear = AppearSection::Theme;
         self.font_filter = None;
         self.font_cursor = 0;
+        self.settings_nav = 0;
         self.reset_settings_query();
     }
 
@@ -5118,6 +5112,7 @@ impl Shell {
     fn nudge_setting(&mut self, delta: isize) {
         let count = self.sheet_doc().hits.len();
         if count == 0 {
+            self.scroll_settings_rows(delta);
             return;
         }
         let last = count - 1;
@@ -5128,6 +5123,20 @@ impl Shell {
         };
         self.settings_selected = next;
         self.land_on_selection();
+    }
+
+    /// Help and an empty search have no rows to land on. j/k scrolls that page.
+    fn scroll_settings_rows(&mut self, delta: isize) {
+        let current = (-self.settings_port.handle.offset().y / px(1.)).max(0.0);
+        let doc = self.sheet_doc().content_h;
+        let view = self.settings_port.view_px().unwrap_or(400.0);
+        let max = (doc - view).max(0.0);
+        let next = match delta {
+            isize::MAX => max,
+            isize::MIN => 0.0,
+            step => (current + step as f32 * LINE).clamp(0.0, max),
+        };
+        self.settings_port.push_px(next);
     }
 
     fn land_on_selection(&mut self) {
@@ -5149,31 +5158,56 @@ impl Shell {
         self.reveal_settings_selection();
     }
 
-    fn jump_section(&mut self, dir: isize) {
-        let hits = self.sheet_doc().hits;
-        if hits.is_empty() {
+    fn toggle_save_target(&mut self) {
+        let from_editor = if let Some(editor) = self.theme_editor.as_mut() {
+            editor.save_target = editor.save_target.toggled();
+            Some(editor.save_target)
+        } else {
+            None
+        };
+        if let Some(target) = from_editor {
+            if let Some(picker) = self.theme_picker.as_mut() {
+                picker.save_target = target;
+            }
             return;
         }
-        let current = hits
-            .get(self.settings_selected)
-            .map(|hit| hit.section)
-            .unwrap_or(0);
-        let index = if dir > 0 {
-            hits.iter().position(|hit| hit.section > current)
-        } else {
-            hits.iter()
-                .rposition(|hit| hit.section < current)
-                .map(|found| {
-                    let section = hits[found].section;
-                    hits.iter()
-                        .position(|hit| hit.section == section)
-                        .unwrap_or(found)
-                })
-        };
-        let Some(index) = index else {
+        if let Some(picker) = self.theme_picker.as_mut() {
+            picker.save_target = picker.save_target.toggled();
+        }
+    }
+
+    fn jump_section(&mut self, dir: isize) {
+        let next = (self.settings_nav as isize + dir).clamp(0, 5) as u8;
+        if next == self.settings_nav && self.settings_query.is_empty() {
             return;
-        };
-        self.settings_selected = index;
+        }
+        self.select_nav(next);
+    }
+
+    /// Show one section on the right. The left list is the only way sections mix.
+    fn select_nav(&mut self, nav: u8) {
+        let nav = nav.min(5);
+        self.settings_query.clear();
+        self.settings_cursor = 0;
+        self.settings_query_on = false;
+        self.settings_nav = nav;
+        self.settings_selected = 0;
+        self.settings_port.push_px(0.0);
+        if nav != 0 {
+            self.appear = AppearSection::Theme;
+            self.font_filter = None;
+            self.font_cursor = 0;
+            self.land_on_selection();
+            return;
+        }
+        if self.theme_editor.is_some() {
+            self.reveal_settings_selection();
+            return;
+        }
+        if let Some(selected) = self.theme_picker.as_ref().map(|picker| picker.selected) {
+            let last = self.sheet_doc().hits.len().saturating_sub(1);
+            self.settings_selected = selected.min(last);
+        }
         self.land_on_selection();
     }
 
@@ -5289,6 +5323,7 @@ impl Shell {
         self.settings_query.clear();
         self.settings_cursor = 0;
         self.settings_query_on = false;
+        self.settings_nav = 0;
         if self.theme_editor.is_none() {
             self.dispatch_theme_picker(EditorKey::Char('e'));
         }
@@ -5426,80 +5461,73 @@ impl Shell {
             blocks: Vec::new(),
             hits: Vec::new(),
             y: 0.0,
-            help_y: 0.0,
-            framed: false,
         };
         if !self.settings_query.trim().is_empty() {
             let rows = crate::settings::matching_rows(self.settings_query.trim());
-            build.push(head_line("Results"), 0);
             if rows.is_empty() {
-                build.push(doc_note("(no matching settings)".into()), 0);
+                build.push(doc_note("(no matching settings)".into()));
             }
             for row in &rows {
                 let selected = build.hits.len() == self.settings_selected;
-                build.push(self.option_from_row(row, selected), section_of(row.page));
+                build.push(self.option_from_row(row, selected));
             }
             return build.finish();
         }
+        match self.settings_nav {
+            0 => self.push_appearance(&mut build),
+            5 => self.push_help(&mut build),
+            nav => self.push_page(&mut build, nav),
+        }
+        build.finish()
+    }
+
+    fn push_appearance(&self, build: &mut DocBuild) {
         if let Some(editor) = &self.theme_editor {
             for line in color_lines(editor) {
-                build.push(line, 0);
+                build.push(line);
             }
-            self.push_help(&mut build);
-            return build.finish();
+            return;
         }
-        build.push(head_line("Appearance"), 0);
         if let Some(picker) = &self.theme_picker {
             for (index, row) in picker.rows.iter().enumerate() {
                 let selected = build.hits.len() == self.settings_selected;
-                build.push(
-                    option_line(
-                        picker_label(row),
-                        String::new(),
-                        String::new(),
-                        selected,
-                        AppearAction::Theme(index),
-                    ),
-                    0,
-                );
+                build.push(option_line(
+                    picker_label(row),
+                    String::new(),
+                    String::new(),
+                    selected,
+                    AppearAction::Theme(index),
+                ));
             }
         }
-        self.push_font_block(&mut build, FontSlot::Editor, AppearSection::Mono);
-        self.push_font_block(&mut build, FontSlot::Preview, AppearSection::Sans);
+        self.push_font_block(build, FontSlot::Editor, AppearSection::Mono);
+        self.push_font_block(build, FontSlot::Preview, AppearSection::Sans);
         let selected = build.hits.len() == self.settings_selected;
-        build.push(
-            option_line(
-                "Edit colors".into(),
-                "Hex overrides on the applied theme. R resets to the built-in palette.".into(),
-                "e".into(),
-                selected,
-                AppearAction::Setting(SettingId::Colors),
-            ),
-            0,
-        );
-        let mut last_page = None;
+        build.push(option_line(
+            "Edit colors".into(),
+            "Hex overrides on the applied theme. R resets to the built-in palette.".into(),
+            "e".into(),
+            selected,
+            AppearAction::Setting(SettingId::Colors),
+        ));
+    }
+
+    fn push_page(&self, build: &mut DocBuild, nav: u8) {
+        let Some(page) = nav_page(nav) else {
+            return;
+        };
         let mut saw_provider = false;
         for row in crate::settings::all_rows() {
-            if matches!(
-                row.id,
-                SettingId::Themes | SettingId::Fonts(_) | SettingId::Colors
-            ) {
+            if row.page != page {
                 continue;
             }
-            let section = section_of(row.page);
-            if last_page != Some(row.page) {
-                build.push(head_line(row.page.label()), section);
-                last_page = Some(row.page);
-            }
             if matches!(row.id, SettingId::AiProvider(_)) && !saw_provider {
-                build.push(head_line("Provider"), section);
+                build.push(head_line("Provider"));
                 saw_provider = true;
             }
             let selected = build.hits.len() == self.settings_selected;
-            build.push(self.option_from_row(&row, selected), section);
+            build.push(self.option_from_row(&row, selected));
         }
-        self.push_help(&mut build);
-        build.finish()
     }
 
     fn option_from_row(&self, row: &SettingRow, selected: bool) -> AppearLine {
@@ -5533,48 +5561,41 @@ impl Shell {
             ),
         };
         let selected = build.hits.len() == self.settings_selected;
-        build.push(
-            option_line(
-                title.into(),
-                detail.into(),
-                value,
-                selected,
-                AppearAction::Focus(section),
-            ),
-            0,
-        );
+        build.push(option_line(
+            title.into(),
+            detail.into(),
+            value,
+            selected,
+            AppearAction::Focus(section),
+        ));
         if self.appear != section {
             return;
         }
         let choices = self.font_choices();
         if choices.is_empty() {
-            build.push(doc_note("(no matching fonts)".into()), 0);
+            build.push(doc_note("(no matching fonts)".into()));
             return;
         }
         for (index, name) in choices.into_iter().enumerate() {
             let selected = build.hits.len() == self.settings_selected;
-            build.push(
-                option_line(
-                    name,
-                    String::new(),
-                    String::new(),
-                    selected,
-                    AppearAction::Family(index),
-                ),
-                0,
-            );
+            build.push(option_line(
+                name,
+                String::new(),
+                String::new(),
+                selected,
+                AppearAction::Family(index),
+            ));
         }
     }
 
     fn push_help(&self, build: &mut DocBuild) {
-        build.push(head_line("Help"), 5);
         for line in help_lines() {
             let text = if line.is_empty() {
                 " ".to_string()
             } else {
                 line
             };
-            build.push(doc_note(text), 5);
+            build.push(doc_note(text));
         }
     }
 
@@ -5582,17 +5603,22 @@ impl Shell {
         let doc = self.sheet_doc();
         let hint = if self.settings_query_on {
             "type to filter    up/down move    Enter    Esc clear".to_string()
-        } else if self.font_filter.is_some() {
+        } else if self.settings_nav == 0 && self.font_filter.is_some() {
             "type to filter    up/down live    Enter keep    Esc clear".to_string()
-        } else if self.theme_editor.is_some() {
+        } else if self.settings_nav == 0 && self.theme_editor.is_some() {
             let target = self
                 .theme_editor
                 .as_ref()
                 .map(|editor| editor.save_target.label())
                 .unwrap_or("");
-            format!("j/k move    y save {target}    Tab target    R reset    Esc back")
+            format!("j/k move    Tab section    y save {target}    t target    R reset")
+        } else if self.settings_nav == 5 {
+            "j/k scroll    Tab section    Esc close".to_string()
+        } else if self.settings_nav == 0 {
+            "j/k move    Enter    / search    Tab section    y save    t target    Esc revert"
+                .to_string()
         } else {
-            "j/k move    Enter    / search    [ ] section    y save    Esc revert".to_string()
+            "j/k move    Enter    / search    Tab section    Esc close".to_string()
         };
         let font_query = if self.appear == AppearSection::Theme || self.theme_editor.is_some() {
             None
@@ -5602,9 +5628,20 @@ impl Shell {
                 cursor: self.font_cursor,
             })
         };
+        let section = if !self.settings_query.trim().is_empty() {
+            "Results".to_string()
+        } else {
+            SETTINGS_NAV
+                .get(self.settings_nav as usize)
+                .copied()
+                .unwrap_or("Themes")
+                .to_string()
+        };
         AppearanceView {
             title: "Settings".into(),
+            section,
             hint,
+            nav: self.settings_nav,
             font_query,
             lines: doc.blocks,
             content_h: doc.content_h,
@@ -6126,7 +6163,9 @@ impl Render for Shell {
                     &theme,
                     frame.theme_panel.as_ref().unwrap_or(&AppearanceView {
                         title: String::new(),
+                        section: String::new(),
                         hint: String::new(),
+                        nav: 0,
                         font_query: None,
                         lines: Vec::new(),
                         content_h: 1.0,
@@ -7178,18 +7217,18 @@ fn block_h(kind: LineKind) -> f32 {
         LineKind::Option => OPTION_H,
         LineKind::Note => NOTE_H,
         LineKind::Hex => HEX_H,
-        LineKind::Rule => RULE_H,
-        LineKind::Gap => SECTION_GAP,
     }
 }
 
-fn section_of(page: SettingsPage) -> u8 {
-    match page {
-        SettingsPage::Appearance => 0,
-        SettingsPage::Editor => 1,
-        SettingsPage::Window => 2,
-        SettingsPage::Ai => 3,
-        SettingsPage::Keymap => 4,
+const SETTINGS_NAV: [&str; 6] = ["Themes", "Editor", "Window", "AI", "Keymap", "Help"];
+
+fn nav_page(nav: u8) -> Option<SettingsPage> {
+    match nav {
+        1 => Some(SettingsPage::Editor),
+        2 => Some(SettingsPage::Window),
+        3 => Some(SettingsPage::Ai),
+        4 => Some(SettingsPage::Keymap),
+        _ => None,
     }
 }
 
@@ -7209,14 +7248,6 @@ fn blank_line(text: String, kind: LineKind, action: AppearAction, selected: bool
 
 fn head_line(text: &str) -> AppearLine {
     blank_line(text.to_string(), LineKind::Head, AppearAction::None, false)
-}
-
-fn rule_line() -> AppearLine {
-    blank_line(String::new(), LineKind::Rule, AppearAction::None, false)
-}
-
-fn gap_line() -> AppearLine {
-    blank_line(String::new(), LineKind::Gap, AppearAction::None, false)
 }
 
 fn doc_note(text: String) -> AppearLine {
@@ -7719,6 +7750,19 @@ fn font_arrow_delta(press: KeyPress<'_>) -> Option<isize> {
     }
 }
 
+fn settings_tab_dir(press: KeyPress<'_>) -> Option<isize> {
+    if press.control {
+        return None;
+    }
+    if press.key == "backtab" || press.key == "iso_left_tab" {
+        return Some(-1);
+    }
+    if press.key == "tab" {
+        return Some(if press.shift { -1 } else { 1 });
+    }
+    None
+}
+
 fn is_fn(press: KeyPress<'_>, n: u8) -> bool {
     if press.control {
         return false;
@@ -7858,17 +7902,22 @@ fn appearance_sheet(theme: &GuiTheme, view: &AppearanceView, entity: Entity<Shel
             entity.clone(),
         )
     } else {
-        appear_line(
-            theme,
-            &option_line(
-                "Search".to_string(),
-                "Filter every option in this sheet.".to_string(),
-                String::new(),
-                false,
-                AppearAction::Search,
-            ),
-            entity.clone(),
-        )
+        let click = entity.clone();
+        div()
+            .h(px(36.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .text_color(rgb(theme.text_secondary))
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                click.update(cx, |shell, cx| {
+                    cx.stop_propagation();
+                    shell.appear_click(AppearAction::Search);
+                    cx.notify();
+                });
+            })
+            .child("Search")
     };
     let mut content = div()
         .flex_1()
@@ -7906,11 +7955,10 @@ fn appearance_sheet(theme: &GuiTheme, view: &AppearanceView, entity: Entity<Shel
         .top(px(CHROME))
         .right(px(0.))
         .bottom(px(CHROME))
-        .w(relative(0.5))
+        .w(relative(0.7))
         .overflow_hidden()
         .flex()
         .flex_col()
-        .px(px(8.))
         .py(px(4.))
         .bg(rgb(theme.modal_background))
         .text_color(rgb(theme.modal_text))
@@ -7926,14 +7974,82 @@ fn appearance_sheet(theme: &GuiTheme, view: &AppearanceView, entity: Entity<Shel
             });
         })
         .child(sheet_heading(theme, &view.title))
-        .child(search)
-        .child(sheet_heading(theme, &view.hint))
-        .child(content)
+        .child(
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_row()
+                .overflow_hidden()
+                .child(settings_nav(theme, view, entity.clone(), search))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .child(sheet_block(theme, &view.section, HEAD_H, false, true))
+                        .child(sheet_heading(theme, &view.hint))
+                        .child(content),
+                ),
+        )
+}
+
+fn settings_nav(
+    theme: &GuiTheme,
+    view: &AppearanceView,
+    entity: Entity<Shell>,
+    search: gpui::Div,
+) -> gpui::Div {
+    let mut column = div()
+        .w(px(200.))
+        .h_full()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .border_r_1()
+        .border_color(rgb(theme.border_default))
+        .bg(rgb(theme.body_background))
+        .child(search);
+    for (index, label) in SETTINGS_NAV.iter().enumerate() {
+        let selected = view.query.text.trim().is_empty() && view.nav as usize == index;
+        let nav = index as u8;
+        let click = entity.clone();
+        let hover_bg = theme.modal_background;
+        column = column.child(
+            div()
+                .h(px(32.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .when(selected, |row| {
+                    row.bg(rgb(theme.selected_background))
+                        .text_color(rgb(theme.text_active_focus))
+                })
+                .when(!selected, |row| row.text_color(rgb(theme.modal_text)))
+                .hover(move |style| style.bg(rgb(hover_bg)))
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    click.update(cx, |shell, cx| {
+                        cx.stop_propagation();
+                        shell.select_nav(nav);
+                        cx.notify();
+                    });
+                })
+                .child(format!("> {label}")),
+        );
+    }
+    column
 }
 
 fn sheet_heading(theme: &GuiTheme, text: &str) -> gpui::Div {
     div()
         .h(px(LINE))
+        .px(px(8.))
         .overflow_hidden()
         .whitespace_nowrap()
         .text_color(rgb(theme.modal_header))
@@ -7950,26 +8066,22 @@ fn sheet_block(theme: &GuiTheme, text: &str, height: f32, dim: bool, header: boo
     } else {
         text.to_string()
     };
-    side_rule(
-        theme,
-        div()
-            .h(px(height))
-            .px(px(8.))
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .when(dim, |row| row.text_color(rgb(theme.text_secondary)))
-            .when(header, |row| {
-                row.bg(rgb(theme.body_background))
-                    .text_color(rgb(theme.modal_header))
-                    .font_weight(FontWeight::BOLD)
-            })
-            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                cx.stop_propagation();
-            })
-            .child(shown),
-    )
+    div()
+        .h(px(height))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .when(dim, |row| row.text_color(rgb(theme.text_secondary)))
+        .when(header, |row| {
+            row.text_color(rgb(theme.modal_header))
+                .font_weight(FontWeight::BOLD)
+        })
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
+        .child(shown)
 }
 
 fn option_block(theme: &GuiTheme, line: &AppearLine, entity: Entity<Shell>) -> gpui::Div {
@@ -7984,72 +8096,63 @@ fn option_block(theme: &GuiTheme, line: &AppearLine, entity: Entity<Shell>) -> g
     let detail = line.detail.clone();
     let selected = line.selected;
     let hover_bg = theme.body_background;
-    side_rule(
-        theme,
-        div()
-            .w_full()
-            .h(px(OPTION_H))
-            .px(px(8.))
-            .flex()
-            .flex_col()
-            .justify_center()
-            .cursor_pointer()
-            .when(selected, |row| {
-                row.bg(rgb(theme.selected_background))
-                    .text_color(rgb(theme.text_active_focus))
-            })
-            .hover(move |style| style.bg(rgb(hover_bg)))
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                click.update(cx, |shell, cx| {
-                    cx.stop_propagation();
-                    shell.appear_click(action);
-                    cx.notify();
-                });
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(title),
-                    )
-                    .when(!value.is_empty(), |row| {
-                        row.child(
-                            div()
-                                .ml(px(12.))
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .when(!selected, |value| value.text_color(rgb(theme.text_labels)))
-                                .child(value),
-                        )
-                    }),
-            )
-            .when(!detail.is_empty(), |row| {
-                row.child(
+    div()
+        .w_full()
+        .h(px(OPTION_H))
+        .px(px(8.))
+        .flex()
+        .flex_col()
+        .justify_center()
+        .cursor_pointer()
+        .when(selected, |row| {
+            row.bg(rgb(theme.selected_background))
+                .text_color(rgb(theme.text_active_focus))
+        })
+        .hover(move |style| style.bg(rgb(hover_bg)))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            click.update(cx, |shell, cx| {
+                cx.stop_propagation();
+                shell.appear_click(action);
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .overflow_hidden()
+                .child(
                     div()
-                        .mt(px(2.))
+                        .flex_1()
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .text_size(px(12.))
-                        .when(!selected, |detail| {
-                            detail.text_color(rgb(theme.text_secondary))
-                        })
-                        .child(detail),
+                        .child(title),
                 )
-            }),
-    )
-}
-
-fn side_rule(theme: &GuiTheme, row: gpui::Div) -> gpui::Div {
-    row.border_l_1()
-        .border_r_1()
-        .border_color(rgb(theme.border_default))
+                .when(!value.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .ml(px(12.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .when(!selected, |value| value.text_color(rgb(theme.text_labels)))
+                            .child(value),
+                    )
+                }),
+        )
+        .when(!detail.is_empty(), |row| {
+            row.child(
+                div()
+                    .mt(px(2.))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(12.))
+                    .when(!selected, |detail| {
+                        detail.text_color(rgb(theme.text_secondary))
+                    })
+                    .child(detail),
+            )
+        })
 }
 
 fn appear_line(theme: &GuiTheme, line: &AppearLine, entity: Entity<Shell>) -> gpui::Div {
@@ -8057,23 +8160,6 @@ fn appear_line(theme: &GuiTheme, line: &AppearLine, entity: Entity<Shell>) -> gp
         LineKind::Option => return option_block(theme, line, entity),
         LineKind::Head => return sheet_block(theme, &line.text, HEAD_H, false, true),
         LineKind::Note => return sheet_block(theme, &line.text, NOTE_H, true, false),
-        LineKind::Rule => {
-            return div()
-                .h(px(RULE_H))
-                .w_full()
-                .bg(rgb(theme.border_default))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                });
-        }
-        LineKind::Gap => {
-            return div().h(px(SECTION_GAP)).w_full().on_mouse_down(
-                MouseButton::Left,
-                |_, _, cx| {
-                    cx.stop_propagation();
-                },
-            );
-        }
         LineKind::Hex => {}
     }
     let action = line.action;
@@ -8153,7 +8239,7 @@ fn appear_line(theme: &GuiTheme, line: &AppearLine, entity: Entity<Shell>) -> gp
             ),
         );
     }
-    side_rule(theme, row)
+    row
 }
 
 fn sheet_frame(theme: &GuiTheme, title: &str) -> gpui::Div {

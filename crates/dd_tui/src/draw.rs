@@ -15,6 +15,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     app.cmd_line = TextLine::default();
     app.ai_line = TextLine::default();
     app.hex_line = TextLine::default();
+    app.settings_nav_area = Rect::default();
     frame.render_widget(Block::default().style(app.theme.app_shell), frame.area());
 
     let root = Layout::default()
@@ -391,6 +392,102 @@ fn settings_row(body: &str, width: usize, edge: Style, fill: Style) -> Line<'sta
     ])
 }
 
+fn paint_settings_nav(frame: &mut Frame, app: &App, nav: Rect) {
+    let block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(Style::default().fg(app.theme.border_default))
+        .style(
+            Style::default()
+                .bg(app.theme.body_background)
+                .fg(app.theme.modal_text),
+        );
+    let inner = block.inner(nav);
+    frame.render_widget(block, nav);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let selected_style = Style::default()
+        .fg(app.theme.text_active_focus)
+        .bg(app.theme.selected_background);
+    let idle = Style::default()
+        .fg(app.theme.modal_text)
+        .bg(app.theme.body_background);
+    let width = inner.width as usize;
+    let mut lines = Vec::new();
+    for (index, label) in crate::settings::NAV.iter().enumerate() {
+        let on = app.settings_nav == index as u8;
+        let marker = if on { ">" } else { " " };
+        let text: String = format!("{marker} {label}").chars().take(width).collect();
+        let style = if on { selected_style } else { idle };
+        lines.push(Line::from(Span::styled(text, style)));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).style(
+            Style::default()
+                .bg(app.theme.body_background)
+                .fg(app.theme.modal_text),
+        ),
+        inner,
+    );
+}
+
+fn paint_settings_lines(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    lines: Vec<Line<'static>>,
+    selected_line: Option<usize>,
+    hex_at: Option<usize>,
+    hex_cols: u16,
+) {
+    if area.width == 0 || area.height == 0 {
+        app.help_scroll_max = 0;
+        app.help_scroll = 0;
+        return;
+    }
+    let view_h = area.height as usize;
+    let max_scroll = lines.len().saturating_sub(view_h) as u16;
+    app.help_scroll_max = max_scroll;
+    if app.settings_follow {
+        if let Some(sel) = selected_line {
+            let top = app.help_scroll as usize;
+            if sel < top {
+                app.help_scroll = sel as u16;
+            } else if sel >= top + view_h {
+                app.help_scroll = (sel + 1 - view_h) as u16;
+            }
+        }
+        app.settings_follow = false;
+    }
+    if app.help_scroll > max_scroll {
+        app.help_scroll = max_scroll;
+    }
+    if let Some(hex_at) = hex_at {
+        let rel = hex_at as i32 - app.help_scroll as i32;
+        if rel >= 0 && (rel as u16) < area.height {
+            app.hex_line = TextLine {
+                area: Rect {
+                    x: area.x,
+                    y: area.y.saturating_add(rel as u16),
+                    width: 5u16.saturating_add(hex_cols).min(area.width.max(1)),
+                    height: 1,
+                },
+                prefix: 5,
+            };
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(
+                Style::default()
+                    .fg(app.theme.modal_text)
+                    .bg(app.theme.modal_background),
+            )
+            .scroll((app.help_scroll, 0)),
+        area,
+    );
+}
+
 fn render_settings(frame: &mut Frame, app: &mut App, body: Rect) {
     use ldnddev_theme::{theme_editor_rows, PickerRow, ThemeEditorRow};
     if body.width == 0 || body.height == 0 {
@@ -424,9 +521,83 @@ fn render_settings(frame: &mut Frame, app: &mut App, body: Rect) {
         return;
     }
 
+    if app.settings_jump_help {
+        app.settings_nav = crate::settings::HELP;
+        app.settings_row = 0;
+        app.help_scroll = 0;
+        app.settings_jump_help = false;
+        app.settings_follow = false;
+    }
+    if app.settings_nav as usize >= crate::settings::NAV.len() {
+        app.settings_nav = 0;
+    }
+
+    let nav_w = {
+        let spare = inner.width.saturating_sub(8);
+        if spare == 0 {
+            1.min(inner.width)
+        } else {
+            14.min(spare).max(1)
+        }
+    };
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(nav_w), Constraint::Min(1)])
+        .split(inner);
+    let nav = cols[0];
+    let page = cols[1];
+    app.settings_nav_area = nav;
+
+    let section = crate::settings::NAV
+        .get(app.settings_nav as usize)
+        .copied()
+        .unwrap_or("Themes");
+    paint_settings_nav(frame, app, nav);
+
+    let title_h = u16::from(page.height > 0);
+    let title_area = Rect {
+        x: page.x,
+        y: page.y,
+        width: page.width,
+        height: title_h,
+    };
+    let content = Rect {
+        x: page.x,
+        y: page.y.saturating_add(title_h),
+        width: page.width,
+        height: page.height.saturating_sub(title_h),
+    };
+    if title_h > 0 {
+        let shown: String = section.chars().take(page.width as usize).collect();
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                shown,
+                Style::default()
+                    .fg(app.theme.modal_header)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .style(
+                Style::default()
+                    .bg(app.theme.modal_background)
+                    .fg(app.theme.modal_header),
+            ),
+            title_area,
+        );
+    }
+
+    if app.settings_nav == crate::settings::HELP {
+        let lines = build_help_text(&app.theme, content.width.max(1) as usize).lines;
+        paint_settings_lines(frame, app, content, lines, None, None, 0);
+        return;
+    }
+    if app.settings_nav != 0 {
+        render_settings_page(frame, app, content);
+        return;
+    }
+
     let editor = app.theme_editor.clone();
     let picker = app.theme_picker.clone();
-    let box_w = inner.width as usize;
+    let box_w = (content.width as usize).max(2);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut selected_line = None;
     let mut hex_at = None;
@@ -439,12 +610,13 @@ fn render_settings(frame: &mut Frame, app: &mut App, body: Rect) {
     let hint = if let Some(editor) = &editor {
         let target = editor.save_target.label();
         if picker.is_some() {
-            format!("j/k move   y save {target}   Tab target   R reset   Esc back")
+            format!("Tab section   j/k move   t target   y save {target}   R reset   Esc back")
         } else {
-            format!("j/k move   y save {target}   Tab target   R reset   Esc revert")
+            format!("Tab section   j/k move   t target   y save {target}   R reset   Esc revert")
         }
     } else {
-        "j/k move   Enter apply   e colors   y save   Esc revert".to_string()
+        "Tab section   j/k move   Enter apply   e colors   y save   t target   Esc revert"
+            .to_string()
     };
     lines.push(Line::from(Span::styled(
         hint,
@@ -542,59 +714,62 @@ fn render_settings(frame: &mut Frame, app: &mut App, body: Rect) {
         lines.push(settings_bottom(box_w, rule));
     }
 
-    lines.push(Line::from(""));
-    lines.push(settings_top("Help", box_w, rule, header));
-    let help_at = lines.len() - 1;
-    lines.extend(build_help_text(&app.theme, box_w.saturating_sub(2)).lines);
-    lines.push(settings_bottom(box_w, rule));
+    paint_settings_lines(frame, app, content, lines, selected_line, hex_at, hex_cols);
+}
 
-    let view_h = inner.height as usize;
-    let max_scroll = lines.len().saturating_sub(view_h) as u16;
-    app.help_scroll_max = max_scroll;
-    if app.settings_jump_help {
-        app.help_scroll = (help_at as u16).min(max_scroll);
-        app.settings_jump_help = false;
-        app.settings_follow = false;
-    } else if app.settings_follow {
-        if let Some(sel) = selected_line {
-            let top = app.help_scroll as usize;
-            if view_h > 0 && sel < top {
-                app.help_scroll = sel as u16;
-            } else if view_h > 0 && sel >= top + view_h {
-                app.help_scroll = (sel + 1 - view_h) as u16;
+fn render_settings_page(frame: &mut Frame, app: &mut App, content: Rect) {
+    let rows = crate::settings::items(app.settings_nav);
+    if !rows.is_empty() && app.settings_row >= rows.len() {
+        app.settings_row = rows.len() - 1;
+    }
+    let selected_style = Style::default()
+        .fg(app.theme.text_active_focus)
+        .bg(app.theme.selected_background);
+    let idle = Style::default().fg(app.theme.modal_text);
+    let header = Style::default()
+        .fg(app.theme.modal_header)
+        .add_modifier(Modifier::BOLD);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Tab section   j/k move   Enter   Esc close",
+        Style::default().fg(app.theme.text_secondary),
+    )));
+    let mut selected_line = None;
+    for slot in crate::settings::slots(app.settings_nav) {
+        match slot {
+            crate::settings::Slot::Head(title) => {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(title, header)));
+            }
+            crate::settings::Slot::Row(index) => {
+                let Some(row) = rows.get(index) else {
+                    continue;
+                };
+                if index == app.settings_row {
+                    selected_line = Some(lines.len());
+                }
+                let value = crate::settings::value(app, row.id);
+                let on = index == app.settings_row;
+                let text = pref_text(row.title, row.keys, &value, on);
+                let style = if on { selected_style } else { idle };
+                lines.push(Line::from(Span::styled(text, style)));
             }
         }
-        app.settings_follow = false;
     }
-    if app.help_scroll > max_scroll {
-        app.help_scroll = max_scroll;
-    }
+    paint_settings_lines(frame, app, content, lines, selected_line, None, 0);
+}
 
-    if let Some(hex_at) = hex_at {
-        let rel = hex_at as i32 - app.help_scroll as i32;
-        if rel >= 0 && (rel as u16) < inner.height {
-            app.hex_line = TextLine {
-                area: Rect {
-                    x: inner.x,
-                    y: inner.y.saturating_add(rel as u16),
-                    width: 5u16.saturating_add(hex_cols).min(inner.width.max(1)),
-                    height: 1,
-                },
-                prefix: 5,
-            };
-        }
+fn pref_text(title: &str, keys: &str, value: &str, on: bool) -> String {
+    let marker = if on { ">" } else { " " };
+    if value.is_empty() && keys.is_empty() {
+        format!("{marker} {title}")
+    } else if value.is_empty() {
+        format!("{marker} {title}  {keys}")
+    } else if keys.is_empty() {
+        format!("{marker} {title}  {value}")
+    } else {
+        format!("{marker} {title}  {value}  {keys}")
     }
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(
-                Style::default()
-                    .fg(app.theme.modal_text)
-                    .bg(app.theme.modal_background),
-            )
-            .scroll((app.help_scroll, 0)),
-        inner,
-    );
 }
 
 fn render_vault_picker(frame: &mut Frame, app: &App) {

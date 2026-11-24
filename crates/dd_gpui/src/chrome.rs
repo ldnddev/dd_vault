@@ -327,12 +327,16 @@ pub fn help_lines() -> Vec<String> {
                 "Editor font, preview font, then back to the theme list",
             ),
             ("/", "Search settings, or filter an open font list"),
+            (
+                "Tab / Shift-Tab",
+                "Next or previous section while Settings is open",
+            ),
             ("[ / ]", "Jump to the previous or next section"),
             (
                 "Y / S",
                 "Save the theme file and any GUI font change (hex edits are overrides)",
             ),
-            ("Tab", "Toggle save target local ↔ global"),
+            ("t", "Toggle save target local ↔ global"),
             ("R", "Reset the color editor to the built-in palette"),
         ],
     );

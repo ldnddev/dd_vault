@@ -12,6 +12,7 @@ mod images;
 mod nav;
 mod open_ext;
 mod palette;
+mod settings;
 mod theme;
 mod toast_chrome;
 mod toasts;

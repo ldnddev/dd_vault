@@ -72,7 +72,7 @@ On Debian and Ubuntu the window needs `libvulkan1` and a driver such as `mesa-vu
 
 On Linux the installer writes a desktop file for each of these binaries that is already in the binary directory. A later run that installs one program still refreshes the other launcher when that other binary is already there.
 
-User installs publish those files in `${XDG_DATA_HOME:-~/.local/share}/applications`. A prefix outside `$HOME` (for example `/usr/local`) uses `$PREFIX/share/applications`. The terminal launcher sets `Terminal=true`. The window launcher sets `Terminal=false` and `StartupWMClass=dd_vault-gui`. macOS skips the desktop files.
+User installs publish those files in `${XDG_DATA_HOME:-~/.local/share}/applications`. A prefix outside `$HOME` (for example `/usr/local`) uses `$PREFIX/share/applications`. The terminal launcher sets `Terminal=true`. The window launcher sets `Terminal=false` and `StartupWMClass=dev.ldnddev.dd_vault`. macOS skips the desktop files.
 
 ## Uninstall
 

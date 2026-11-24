@@ -42,6 +42,8 @@ struct ViewTick {
     pane: Pane,
     show_help: bool,
     help_scroll: u16,
+    settings_nav: u8,
+    settings_row: usize,
     show_theme: bool,
     theme_sel: usize,
     hex_cursor: usize,
@@ -126,6 +128,8 @@ impl ViewTick {
             pane: app.pane,
             show_help: app.show_help,
             help_scroll: app.help_scroll,
+            settings_nav: app.settings_nav,
+            settings_row: app.settings_row,
             show_theme: app.show_theme,
             theme_sel: app
                 .theme_editor
@@ -270,6 +274,11 @@ fn handle_help(app: &mut App, evt: Event) -> Result<()> {
 }
 
 fn handle_theme(app: &mut App, evt: Event) -> Result<()> {
+    if app.modal.is_none() {
+        app.settings_modal = false;
+    } else if app.settings_modal {
+        return handle_modal(app, evt);
+    }
     match evt {
         Event::Key(k) => {
             if k.code == KeyCode::F(1) {
@@ -278,19 +287,52 @@ fn handle_theme(app: &mut App, evt: Event) -> Result<()> {
                 scroll_settings(app, 10);
             } else if k.code == KeyCode::PageUp {
                 scroll_settings(app, -10);
-            } else if let Some(ek) = map_editor_key(k) {
-                let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-                if app.theme_editor.is_some() {
-                    dispatch_theme_editor(app, ek, shift);
+            } else if !settings_section_key(app, k) {
+                if app.settings_nav == crate::settings::HELP {
+                    match k.code {
+                        KeyCode::Esc => close_theme(app, true),
+                        KeyCode::Down | KeyCode::Char('j') => scroll_settings(app, 1),
+                        KeyCode::Up | KeyCode::Char('k') => scroll_settings(app, -1),
+                        KeyCode::Home | KeyCode::Char('g') => app.help_scroll = 0,
+                        KeyCode::End | KeyCode::Char('G') => app.help_scroll = app.help_scroll_max,
+                        _ => {}
+                    }
+                } else if app.settings_nav == 0 {
+                    if save_target_key(app, k) {
+                        toggle_save_target(app);
+                    } else if let Some(ek) = map_editor_key(k) {
+                        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+                        if app.theme_editor.is_some() {
+                            dispatch_theme_editor(app, ek, shift);
+                        } else {
+                            dispatch_theme_picker(app, ek);
+                        }
+                    }
                 } else {
-                    dispatch_theme_picker(app, ek);
+                    match k.code {
+                        KeyCode::Esc => close_theme(app, true),
+                        KeyCode::Down | KeyCode::Char('j') => crate::settings::move_row(app, 1),
+                        KeyCode::Up | KeyCode::Char('k') => crate::settings::move_row(app, -1),
+                        KeyCode::Home | KeyCode::Char('g') => {
+                            crate::settings::move_row(app, isize::MIN);
+                        }
+                        KeyCode::End | KeyCode::Char('G') => {
+                            crate::settings::move_row(app, isize::MAX);
+                        }
+                        KeyCode::Enter => crate::settings::activate(app),
+                        _ => {}
+                    }
                 }
             }
         }
         Event::Mouse(m) => match m.kind {
             MouseEventKind::ScrollUp => scroll_settings(app, -3),
             MouseEventKind::ScrollDown => scroll_settings(app, 3),
-            MouseEventKind::Down(MouseButton::Left) => place_hex_click(app, m.column, m.row),
+            MouseEventKind::Down(MouseButton::Left)
+                if !settings_nav_click(app, m.column, m.row) =>
+            {
+                place_hex_click(app, m.column, m.row);
+            }
             _ => {}
         },
         _ => {}
@@ -1027,6 +1069,101 @@ impl App {
     }
 }
 
+fn editing_theme_hex(app: &App) -> bool {
+    app.theme_editor
+        .as_ref()
+        .is_some_and(|editor| editor.editing_hex)
+}
+
+/// Tab, Shift-Tab, `[`, and `]` change the settings page.
+/// A hex field keeps the brackets. Tab still moves the section.
+fn settings_section_key(app: &mut App, k: KeyEvent) -> bool {
+    let Some(dir) = settings_section_dir(k) else {
+        return false;
+    };
+    let tab = matches!(k.code, KeyCode::Tab | KeyCode::BackTab);
+    if !tab && editing_theme_hex(app) {
+        return false;
+    }
+    let next = (app.settings_nav as isize + dir).clamp(0, crate::settings::LAST as isize) as u8;
+    if next != app.settings_nav {
+        app.settings_nav = next;
+        app.settings_row = 0;
+        app.help_scroll = 0;
+        app.settings_follow = true;
+    }
+    true
+}
+
+fn settings_section_dir(k: KeyEvent) -> Option<isize> {
+    if k.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(k.code, KeyCode::Tab | KeyCode::BackTab)
+    {
+        return None;
+    }
+    match k.code {
+        KeyCode::BackTab => Some(-1),
+        KeyCode::Tab => {
+            if k.modifiers.contains(KeyModifiers::SHIFT) {
+                Some(-1)
+            } else {
+                Some(1)
+            }
+        }
+        KeyCode::Char(']') => Some(1),
+        KeyCode::Char('[') => Some(-1),
+        _ => None,
+    }
+}
+
+fn save_target_key(app: &App, k: KeyEvent) -> bool {
+    if editing_theme_hex(app) || k.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    matches!(k.code, KeyCode::Char('t') | KeyCode::Char('T'))
+}
+
+fn toggle_save_target(app: &mut App) {
+    let from_editor = if let Some(editor) = app.theme_editor.as_mut() {
+        editor.save_target = editor.save_target.toggled();
+        Some(editor.save_target)
+    } else {
+        None
+    };
+    if let Some(target) = from_editor {
+        if let Some(picker) = app.theme_picker.as_mut() {
+            picker.save_target = target;
+        }
+        return;
+    }
+    if let Some(picker) = app.theme_picker.as_mut() {
+        picker.save_target = picker.save_target.toggled();
+    }
+}
+
+fn settings_nav_click(app: &mut App, col: u16, row: u16) -> bool {
+    let area = app.settings_nav_area;
+    if area.width == 0 || area.height == 0 {
+        return false;
+    }
+    let inside = col >= area.x
+        && row >= area.y
+        && col < area.x.saturating_add(area.width)
+        && row < area.y.saturating_add(area.height);
+    if !inside {
+        return false;
+    }
+    let rel = usize::from(row.saturating_sub(area.y));
+    if rel >= crate::settings::NAV.len() {
+        return true;
+    }
+    app.settings_nav = rel as u8;
+    app.settings_row = 0;
+    app.help_scroll = 0;
+    app.settings_follow = true;
+    true
+}
+
 fn scroll_settings(app: &mut App, delta: i32) {
     app.settings_follow = false;
     if delta < 0 {
@@ -1229,6 +1366,9 @@ fn close_theme(app: &mut App, revert: bool) {
     app.show_help = false;
     app.settings_jump_help = false;
     app.settings_follow = false;
+    app.settings_nav = 0;
+    app.settings_row = 0;
+    app.settings_modal = false;
     app.help_scroll = 0;
 }
 

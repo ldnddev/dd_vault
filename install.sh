@@ -36,6 +36,38 @@ NEED_RUST_GUI="1.92"
 say() { printf '%s\n' "$*"; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
+# ldnddev wordmark, half-block art of the white-on-black mark.
+# Printed only on a terminal so a captured log stays plain text.
+print_mark() {
+  [[ -t 1 ]] || return 0
+  printf '\033[40;97m'
+  cat <<'EOF'
+
+█▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀█
+█  ██                ██                         ██  █
+█  ██                ██                         ██  █
+█  ██         ▄▄▄▄▄▄ ██     ▄▄▄▄▄▄       ▄▄▄▄▄▄ ██  █
+█  ██       ▄██▀▀▀▀▀███  ▄██████████▄  ▄██▀▀▀▀▀███  █
+█  ██      ██▀       ██  ██        ██ ██▀       ██  █
+█  ██      ██        ██  ██        ██ ██        ██  █
+█  ██      ▀█▄       ██  ██        ██ ▀█▄       ██  █
+█  ▀█▄▄▄▄▄  ▀██▄▄▄▄██▀   ██        ██  ▀██▄▄▄▄██▀   █
+█   ▀▀▀▀▀▀    ▀▀▀▀▀▀     ▀▀        ▀▀    ▀▀▀▀▀▀     █
+█                                                   █
+█                     ██                            █
+█                     ██                            █
+█              ▄▄▄▄▄▄ ██     ▄▄▄▄▄▄    ▄▄      ▄▄▄  █
+█            ▄██▀▀▀▀▀███   ██▀▀▀▀███   ██     ▄██   █
+█           ██▀       ██  ██    ██▀ ▄▄ ██    ▄██    █
+█           ██        ██  ██  ▄██   ██ ██    ██     █
+█           ▀█▄       ██  ██▄██▀   ▄█▀ ██  ▄██      █
+█  ▄▄▄▄▄▄▄▄  ▀██▄▄▄▄██▀    ▀███▄▄▄██▀  ██▄██▀       █
+█  ▀▀▀▀▀▀▀▀    ▀▀▀▀▀▀        ▀▀▀▀▀▀    ▀▀▀▀         █
+▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+EOF
+  printf '\033[0m\n'
+}
+
 usage() {
   cat <<EOF
 Usage: install.sh [--tui | --gui | --both] [--uninstall]
@@ -153,7 +185,7 @@ install_launchers() {
       "$BIN_DIR/dd_vault-gui" \
       "false" \
       "true" \
-      "dd_vault-gui"
+      "dev.ldnddev.dd_vault"
     say "Launcher $dir/dd_vault-gui.desktop"
   fi
   if command -v update-desktop-database >/dev/null 2>&1; then
@@ -301,6 +333,7 @@ choose_target() {
 }
 
 main() {
+  print_mark
   local action=install
   local target=""
   while [[ $# -gt 0 ]]; do

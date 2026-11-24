@@ -2,7 +2,7 @@
 //!
 //! Preferences write the files the commands already use. The keymap lists the
 //! Space chords. Save, git, and the other palette commands stay in the palette.
-//! F1 opens the sheet. Help is a section of that sheet, not a second overlay.
+//! F1 opens the sheet. The left list picks one section. Help is that list's last page.
 
 use crate::commands::Chord;
 
@@ -18,7 +18,7 @@ pub enum SettingsPage {
 impl SettingsPage {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Appearance => "Appearance",
+            Self::Appearance => "Themes",
             Self::Editor => "Editor",
             Self::Window => "Window",
             Self::Ai => "AI",
@@ -27,7 +27,7 @@ impl SettingsPage {
     }
 }
 
-/// Which face the Appearance search row opens.
+/// Which face a Themes font row opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FontSlot {
     Editor,
@@ -304,7 +304,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pages_are_appearance_editor_window_ai_and_keymap() {
+    fn pages_are_themes_editor_window_ai_and_keymap() {
         assert_eq!(
             [
                 SettingsPage::Appearance.label(),
@@ -313,7 +313,7 @@ mod tests {
                 SettingsPage::Ai.label(),
                 SettingsPage::Keymap.label(),
             ],
-            ["Appearance", "Editor", "Window", "AI", "Keymap"]
+            ["Themes", "Editor", "Window", "AI", "Keymap"]
         );
     }
 

@@ -89,7 +89,10 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
         &mut lines,
         "Global",
         &[
-            ("F1", "Open/close Settings (themes, colors, and this help)"),
+            (
+                "F1",
+                "Open/close Settings (themes, editor, window, AI, keymap, and this help)",
+            ),
             ("Ctrl+Q", "Quit"),
             ("Tab", "Focus tree → editor → preview"),
             (
@@ -133,11 +136,19 @@ pub fn build_help_text(theme: &AppTheme, width: usize) -> Text<'static> {
         "Settings",
         &[
             ("F1 / Esc", "Close Settings (unsaved theme edits revert)"),
-            ("j/k or arrows", "Move the theme or color row and paint it"),
-            ("Enter", "Apply the highlighted theme, or edit its hex"),
+            (
+                "Tab / Shift-Tab",
+                "Next or previous section while Settings is open",
+            ),
+            (
+                "[ / ]",
+                "Previous or next section. The right side shows only that page",
+            ),
+            ("j/k or arrows", "Move the row. On Help, this scrolls"),
+            ("Enter", "Apply the highlighted row, or edit a color's hex"),
             ("e", "Edit colors for the applied theme"),
             ("Y / S", "Save the theme (hex edits are overrides)"),
-            ("Tab", "Toggle save target local ↔ global"),
+            ("t", "Toggle save target local ↔ global"),
             ("R", "Reset the color editor to the built-in palette"),
             ("PgUp / PgDn", "Scroll this sheet"),
             ("Wheel", "Scroll this sheet"),

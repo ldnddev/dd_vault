@@ -5,7 +5,8 @@ use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
 use crate::app::{
-    App, ConfirmKind, FinderKind, Leader, Modal, Pane, BUSY_POLL, CHANNEL_POLL, REST_POLL,
+    App, ConfirmKind, FinderKind, Leader, Modal, Pane, PromptKind, BUSY_POLL, CHANNEL_POLL,
+    REST_POLL,
 };
 use crate::theme::AppTheme;
 use crate::toasts::ToastLevel;
@@ -331,6 +332,128 @@ fn default_layout_snapshot_narrow() {
     let footer = text.lines().last().unwrap();
     assert!(footer.contains("F1:"), "{footer}");
     assert!(!footer.contains("F2"), "{footer}");
+}
+
+#[test]
+fn settings_section_shows_only_that_page() {
+    let mut app = chrome_app();
+    send_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+    let colors = buffer_text(&mut app, 100, 24);
+    assert!(colors.contains("> Themes"), "{colors}");
+    assert!(colors.contains("body_background"), "{colors}");
+    assert!(!colors.contains("Open/close"), "{colors}");
+    send_key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE);
+    let editor = buffer_text(&mut app, 100, 24);
+    assert_eq!(app.settings_nav, 1);
+    assert!(editor.contains("> Editor"), "{editor}");
+    assert!(editor.contains("Wrap lines"), "{editor}");
+    assert!(!editor.contains("body_background"), "{editor}");
+    assert!(!editor.contains("Open/close"), "{editor}");
+    for _ in 0..4 {
+        send_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    }
+    let help = buffer_text(&mut app, 100, 24);
+    assert_eq!(app.settings_nav, 5);
+    assert!(help.contains("> Help"), "{help}");
+    assert!(help.contains("Open/close"), "{help}");
+    assert!(!help.contains("body_background"), "{help}");
+    assert!(app.settings_nav_area.height > 1, "nav was not drawn");
+    app.handle_event(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: app.settings_nav_area.x,
+        row: app.settings_nav_area.y,
+        modifiers: KeyModifiers::NONE,
+    }))
+    .expect("nav click");
+    let back = buffer_text(&mut app, 100, 24);
+    assert_eq!(app.settings_nav, 0);
+    assert!(back.contains("> Themes"), "{back}");
+    assert!(back.contains("body_background"), "{back}");
+    assert!(!back.contains("Open/close"), "{back}");
+}
+
+#[test]
+fn settings_tab_moves_sections_and_runs_rows() {
+    let mut app = chrome_app();
+    send_key(&mut app, KeyCode::F(1), KeyModifiers::NONE);
+    assert_eq!(
+        app.theme_editor
+            .as_ref()
+            .map(|editor| editor.save_target.label()),
+        Some("global")
+    );
+    send_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+    assert_eq!(
+        app.theme_editor
+            .as_ref()
+            .map(|editor| editor.save_target.label()),
+        Some("local")
+    );
+    send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app
+        .theme_editor
+        .as_ref()
+        .is_some_and(|editor| editor.editing_hex));
+    send_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+    assert_eq!(
+        app.theme_editor
+            .as_ref()
+            .map(|editor| editor.save_target.label()),
+        Some("local"),
+        "t edits the hex field and leaves the save target"
+    );
+    assert_eq!(app.settings_nav, 0);
+    send_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.settings_nav, 1);
+    send_key(&mut app, KeyCode::BackTab, KeyModifiers::NONE);
+    assert_eq!(app.settings_nav, 0);
+    send_key(&mut app, KeyCode::Tab, KeyModifiers::SHIFT);
+    assert_eq!(app.settings_nav, 0, "Shift-Tab stops on the first section");
+    send_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert!(app.wrap_notes);
+    send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!app.wrap_notes);
+    send_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    let window = buffer_text(&mut app, 100, 24);
+    assert!(window.contains("Show preview"), "{window}");
+    assert!(window.contains("Zen"), "{window}");
+    send_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    let ai = buffer_text(&mut app, 120, 30);
+    assert_eq!(app.settings_nav, 3);
+    assert!(ai.contains("Enabled"), "{ai}");
+    assert!(ai.contains("SpaceXAI"), "{ai}");
+    assert!(ai.contains("Provider"), "{ai}");
+    for _ in 0..7 {
+        send_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+    }
+    send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    let draft = match &app.modal {
+        Some(Modal::Prompt {
+            kind: PromptKind::AiModel,
+            draft,
+            ..
+        }) => draft.clone(),
+        other => panic!("model prompt, got {other:?}"),
+    };
+    assert!(app.show_theme);
+    send_key(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+    match &app.modal {
+        Some(Modal::Prompt {
+            kind: PromptKind::AiModel,
+            draft: next,
+            ..
+        }) => assert_eq!(next, &format!("{draft}z")),
+        other => panic!("prompt kept the key, got {other:?}"),
+    }
+    send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(app.modal.is_none());
+    assert!(app.show_theme);
+    for _ in 0..3 {
+        send_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    }
+    assert_eq!(app.settings_nav, 5);
+    send_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.settings_nav, 5, "Tab stops on Help");
 }
 
 #[test]
